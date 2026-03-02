@@ -1,7 +1,7 @@
 # Worktree Manager — Design Document
 
 **Date:** 2026-03-02
-**Status:** Design approved, ready for implementation
+**Status:** Implemented and published — https://github.com/tejasdc/worktrees
 
 ---
 
@@ -111,12 +111,14 @@ CLAUDE.md already says "NEVER use git add -A" and "ALWAYS add files by explicit 
 ### Architecture
 
 ```
-scripts/worktree.sh               ← Standalone script (all logic)
+~/.local/bin/worktree.sh          ← Standalone script (global symlink)
     ▲                ▲
-    │                │
-Claude hook          Shell function (wt)
-(optional, later)    (auto-cd wrapper)
+    |                |
+Shell function       Claude hook
+(wt, auto-cd)       (future, optional)
 ```
+
+The script lives at `scripts/worktree.sh` in the repo and is symlinked to `~/.local/bin/worktree.sh` by the installer. The `wt()` shell function finds it via PATH (`command -v worktree.sh`).
 
 ### Commands
 
@@ -172,59 +174,63 @@ wt cleanup
     │
     ├── 1. List all worktrees in .worktrees/
     │
-    ├── 2. For each: check if branch is merged into origin/main
-    │       git branch --merged origin/main | grep worktree-<name>
+    ├── 2. Fetch merge target (origin/main or origin/master)
     │
-    ├── 3. Merged → git worktree remove + git branch -d
+    ├── 3. For each: check if branch is merged using merge-base --is-ancestor
+    │       Skip if cwd is inside this worktree (is_cwd_inside prefix match)
+    │
+    ├── 4. Merged → git worktree remove + git branch -d (verify remove succeeded)
     │       Not merged → skip, report "my-feature: not merged, keeping"
     │
-    └── 4. Report summary: "Removed 3 worktrees, 2 still active"
+    └── 5. Report summary: "Removed 3 worktrees, 2 still active"
+            Clean up empty .worktrees/ directory if all removed
 ```
 
 ### Shell Function (wt)
 
-The `wt` function wraps the script to enable cd-ing into the worktree (scripts can't change parent shell directory):
+The `wt` function wraps the globally-installed script to enable cd-ing into the worktree (scripts can't change parent shell directory):
 
 ```bash
-# Added to ~/.zshrc or ~/.bashrc
+# Added to ~/.zshrc or ~/.bashrc by install.sh
 wt() {
-  # Locate script relative to the git repo root
-  local repo_root
-  repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
-  if [ -z "$repo_root" ]; then
-    echo "Error: not in a git repository"
+  if ! command -v worktree.sh &>/dev/null; then
+    echo "Error: worktree.sh not found on PATH. Run the installer again." >&2
     return 1
   fi
 
-  local script="$repo_root/scripts/worktree.sh"
-  if [ ! -f "$script" ]; then
-    echo "Error: scripts/worktree.sh not found in repo root"
-    return 1
-  fi
+  # For create (default command), capture the path and cd into it
+  if [ $# -ge 1 ] && [ "$1" != "list" ] && [ "$1" != "ls" ] && \
+     [ "$1" != "cleanup" ] && [ "$1" != "clean" ] && \
+     [ "$1" != "help" ] && [ "$1" != "--help" ] && [ "$1" != "-h" ]; then
+    local output
+    output=$(worktree.sh "$@")
+    local exit_code=$?
 
-  local output
-  output=$(bash "$script" "$@")
-  local exit_code=$?
-
-  if [ $exit_code -eq 0 ] && [ "$1" != "list" ] && [ "$1" != "cleanup" ] && [ -d "$output" ]; then
-    cd "$output"
-    echo "Now in: $(pwd) (branch: $(git branch --show-current))"
+    if [ $exit_code -eq 0 ] && [ -n "$output" ] && [ -d "$output" ]; then
+      cd "$output"
+      echo -e "\033[0;32mNow in:\033[0m $(pwd)"
+      echo -e "\033[2mBranch:\033[0m $(git branch --show-current 2>/dev/null || echo unknown)"
+    else
+      [ -n "$output" ] && echo "$output"
+      return $exit_code
+    fi
   else
-    echo "$output"
+    # For list, cleanup, help — just run normally (output goes to stderr)
+    worktree.sh "$@"
   fi
 }
 ```
 
-Note: The script must be installed per-repo at `scripts/worktree.sh`. The shell function finds it dynamically from the git root. This means ANY repo that has the script gets worktree support — no global installation needed.
+The script is installed globally at `~/.local/bin/worktree.sh` via symlink, and the shell function finds it via PATH (`command -v`). This means `wt` works from any git repo without per-repo installation.
 
 ### Claude Hook Integration (Future, Optional)
 
-When ready, add a thin Claude hook that calls the same script:
+When ready, add a thin Claude hook that calls the globally-installed script:
 
 ```
 .claude/hooks/worktree-create.sh:
   Reads JSON input (name) from stdin
-  Calls scripts/worktree.sh with the name
+  Calls worktree.sh (found via PATH) with the name
   Passes stdout through (worktree path)
 
 .claude/settings.json:
@@ -235,44 +241,56 @@ This makes `claude -w my-feature` use our script with full .env/keys copying ins
 
 ---
 
-## Implementation Plan
+## Implementation Plan (Completed)
 
-### Step 1: Create `scripts/worktree.sh`
+### Step 1: Create `scripts/worktree.sh` — DONE
 
-Core script with three commands:
-- Default (create): validate inputs → fetch origin/main → git worktree add → discover & copy files → print path
-- `list`: enumerate .worktrees/, show branch names, merge status (merged/active)
-- `cleanup`: find merged worktrees, remove them, report results
+Core script with three commands + help, plus these key implementation details:
 
-Key implementation details:
-- Use `git check-ignore -q` to filter file discovery results
-- Use `git rev-parse --show-toplevel` to find repo root
-- Use `git branch --merged origin/main` to check merge status
-- Preserve relative directory structure when copying files
-- All user-facing output to stderr, only worktree path to stdout (for shell function and Claude hook compatibility)
-- Handle edge cases: name already taken, .worktrees/ not gitignored (auto-fix), no origin remote
+- **Repo root resolution:** `git rev-parse --git-common-dir` (NOT `--show-toplevel`) to correctly resolve to the main repo even when run from inside an existing worktree
+- **Merge detection:** `git merge-base --is-ancestor` (NOT `git branch --merged | grep`) for correct semantic check without substring matching bugs
+- **Merge target:** `get_merge_target()` helper tries `origin/main`, then `origin/master`, then falls back to `HEAD`
+- **Commit counting:** `git rev-list --count` with `|| echo 0` for pipefail safety (NOT `git log | wc -l`)
+- **Current worktree detection:** `is_cwd_inside()` prefix match on resolved paths (handles subdirectories, not just exact equality)
+- **Input validation:** Rejects names with slashes, backslashes, spaces, or leading dots
+- **Bash 4+ check:** Script requires bash 4+ for associative arrays (`local -A`). Exits early with install instructions on macOS system bash 3.2
+- **Idempotent creation:** If worktree already exists, prints path and exits 0 (shell function cd's into it)
+- **Symlink-safe copy:** `cp -R -P` preserves symlinks instead of dereferencing them
+- **Cleanup verification:** Checks that `git worktree remove` actually succeeded before deleting the branch
 
-### Step 2: Create shell function installer
+### Step 2: Create installer (`scripts/install.sh`) — DONE
 
-A small script or instructions to add the `wt` function to the user's shell config (~/.zshrc or ~/.bashrc). Could be:
-- A `setup.sh` script that appends the function
-- Or just documented instructions in the README
+- Symlinks `scripts/worktree.sh` to `~/.local/bin/worktree.sh`
+- Adds `wt()` shell function to `~/.zshrc` or `~/.bashrc` with marker-based idempotent installation
+- Uses `$SHELL` env var to detect correct rc file (not just file existence)
+- Verifies both start AND end markers exist before awk rewrite (prevents rc file truncation if markers are corrupt)
 
-### Step 3: Add .worktrees/ to .gitignore (per-repo)
+### Step 3: Auto-gitignore — DONE
 
-The script should check for this on first run and offer to add it if missing (like the compound-engineering script does). Non-interactive: if not gitignored, add it automatically and report.
+Script checks `git check-ignore -q .worktrees/` on every create. If not gitignored, appends `.worktrees/` to `.gitignore` automatically.
 
-### Step 4: Test with real scenarios
+### Step 4: Testing — DONE
 
-- Create worktree in Cortex monorepo (has subdirectory .env files + keys/ dir)
-- Create worktree in a simple single-package repo
-- Verify agents (Claude, Codex) can work normally in the worktree
-- Verify push/PR flow works from worktree
-- Verify cleanup only removes merged worktrees
+- Tested in Cortex monorepo (subdirectory .env files + keys/ dir)
+- Verified create → list → cleanup cycle with both empty and committed worktrees
+- Verified worktree-from-worktree creation (the `--git-common-dir` fix)
+- Verified unpushed branches show correct status (the pipefail fix)
+- Verified cleanup only removes merged worktrees and skips current worktree
 
-### Step 5 (Future): Claude WorktreeCreate hook
+### Step 5: Codex Review — DONE
 
-Thin wrapper calling `scripts/worktree.sh`. Deferred until core script is proven.
+Codex found 7 issues, all applied:
+1. **High:** `merge-base --is-ancestor` replaces `git branch --merged | grep`
+2. **High:** `rev-list --count` replaces `git log | wc -l` pipelines
+3. **High:** `is_cwd_inside()` prefix match replaces exact equality
+4. **Medium:** Conditional cleanup success (verify `git worktree remove` succeeded)
+5. **Medium:** `cp -R -P` for symlink safety
+6. **Medium:** Installer verifies both markers before awk rewrite
+7. **Low:** `$SHELL`-based rc file detection
+
+### Step 6 (Future): Claude WorktreeCreate hook
+
+Thin wrapper calling `worktree.sh` (found via PATH). Deferred until core script is proven.
 
 ---
 
@@ -281,6 +299,6 @@ Thin wrapper calling `scripts/worktree.sh`. Deferred until core script is proven
 1. **`.worktreerc` config file** — For projects that need additional files copied beyond .env and keys. Deferred until we hit a case that needs it.
 2. **APFS copy-on-write for node_modules** — `cp -c` for near-instant cloning on macOS. Deferred since agents install on demand.
 3. **Deterministic port assignment** — Hash branch name to assign unique dev server ports per worktree. Not needed yet.
-4. **`wt resume my-feature`** — cd back into an existing worktree without recreating. Could be useful. Simple to add later.
-5. **Auto-gitignore for new repos** — Script could create `.worktrees/` entry in `.gitignore` automatically on first use.
+4. ~~**`wt resume my-feature`** — cd back into an existing worktree without recreating.~~ **DONE** — creation is idempotent. Running `wt my-feature` when it already exists prints the path and the shell function cd's into it.
+5. ~~**Auto-gitignore for new repos** — Script could create `.worktrees/` entry in `.gitignore` automatically on first use.~~ **DONE** — `ensure_gitignored()` checks and auto-adds on every create.
 6. **Claude --worktree default** — GitHub issue #27616 requests a settings.json option. When available, could replace the shell alias for Claude users.
