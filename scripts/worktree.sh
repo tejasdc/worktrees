@@ -328,6 +328,24 @@ cmd_create() {
   # Discover and copy config files
   discover_and_copy_files "$repo_root" "$worktree_path"
 
+  # Run project-specific bootstrap if it exists
+  local bootstrap_script="$worktree_path/scripts/worktree-bootstrap.sh"
+  if [ -f "$bootstrap_script" ]; then
+    log ""
+    info "Running project bootstrap script..."
+    log ""
+    if bash "$bootstrap_script"; then
+      success "Project bootstrap completed"
+    else
+      warn "Bootstrap script exited with errors (exit code $?)"
+      warn "You may need to run it manually: cd $worktree_path && bash scripts/worktree-bootstrap.sh"
+    fi
+  else
+    log ""
+    log "  ${DIM}No bootstrap script found at scripts/worktree-bootstrap.sh${NC}"
+    log "  ${DIM}Add one to auto-install dependencies on worktree creation${NC}"
+  fi
+
   # Summary
   log ""
   log "${DIM}────────────────────────────────────────${NC}"
@@ -558,6 +576,7 @@ What happens on create:
      - *.pem, *.key, *.pub files
      - Directories named "keys/"
   4. Prints the worktree path (shell function auto-cd's)
+  5. Runs scripts/worktree-bootstrap.sh if present (installs deps, generates env)
 
 What happens on cleanup:
   - Only removes worktrees whose branches are merged into main
