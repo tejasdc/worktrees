@@ -145,7 +145,7 @@ copy_file_preserving_structure() {
   mkdir -p "$dest_dir"
   cp "$source" "$dest"
 
-  # Preserve file permissions (important for SSH keys)
+  # Preserve file permissions
   chmod --reference="$source" "$dest" 2>/dev/null || \
     chmod "$(stat -f '%Lp' "$source" 2>/dev/null || stat -c '%a' "$source" 2>/dev/null)" "$dest" 2>/dev/null || true
 
