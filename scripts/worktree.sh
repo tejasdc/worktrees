@@ -334,7 +334,7 @@ cmd_create() {
     log ""
     info "Running project bootstrap script..."
     log ""
-    if bash "$bootstrap_script"; then
+    if bash "$bootstrap_script" >&2; then
       success "Project bootstrap completed"
     else
       warn "Bootstrap script exited with errors (exit code $?)"
