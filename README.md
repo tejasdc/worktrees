@@ -1,9 +1,9 @@
 # wt — Git Worktree Manager
 
-Single-command worktree creation with automatic config file copying. Built for parallel AI agent development.
+Single-command worktree creation with automatic `.env` copying and project bootstrap. Built for parallel AI agent development.
 
 ```bash
-wt my-feature            # Create worktree, copy .env/keys, cd into it
+wt my-feature            # Create worktree, copy .env, run bootstrap, cd into it
 wt list                  # Show all worktrees with merge status
 wt cleanup               # Remove worktrees whose branches are merged
 ```
@@ -33,18 +33,21 @@ Requires bash 4+ (macOS: `brew install bash`).
 
 1. Creates git worktree at `.worktrees/<name>/`
 2. Creates branch `worktree-<name>` from `origin/main`
-3. Discovers and copies gitignored config files:
-   - `.env*` files (max 3 levels deep, excludes `.env.example`)
-   - `*.pem`, `*.key`, `*.pub` files
-   - Directories named `keys/`
+3. Copies gitignored `.env*` files from the main repo (excludes `.env.example`)
 4. Runs `scripts/worktree-bootstrap.sh` if present (project-specific setup)
 5. Prints the worktree path (shell function auto-cd's)
 
-Only copies files that are **both** matching the patterns **and** gitignored (local secrets, not tracked files).
+Only copies `.env*` files that are gitignored (local secrets, not tracked files the worktree already has).
+
+For project-specific files (SSH keys, certificates, etc.), add the copying logic to your `scripts/worktree-bootstrap.sh`.
 
 ### Project Bootstrap Hook
 
-If the repo contains `scripts/worktree-bootstrap.sh`, it runs automatically after file copying. This lets each project define its own setup — install dependencies, generate Prisma clients, allocate dev server ports, etc.
+If the repo contains `scripts/worktree-bootstrap.sh`, it runs automatically after `.env` copying. Use it for anything project-specific:
+- Install dependencies (`npm install`, `bundle install`)
+- Copy SSH keys or certificates
+- Generate clients (Prisma, protobuf)
+- Allocate dev server ports
 
 The bootstrap script is **project-owned** (lives in the repo, not in `wt`). The `wt` tool just looks for and runs it. This keeps `wt` project-agnostic.
 
@@ -83,8 +86,7 @@ Shell function       Claude hook
 | `worktree-` branch prefix | Prevents collisions with real branches |
 | Merge-gated cleanup only | Auto-merging is dangerous; only clean up what's merged |
 | No `create` subcommand | `wt my-feature` is cleaner than `wt create my-feature` |
-| Defer node_modules copy | Agents install when they need to build/test; saves 3-5 min on creation |
-| Dynamic file discovery via `git check-ignore` | Workspace-agnostic; works with any repo layout |
+| Only copy `.env*` (not keys/certs) | `.env` is universal; project-specific files belong in the bootstrap script |
 | Bootstrap hook via convention (`scripts/worktree-bootstrap.sh`) | Project owns its setup; `wt` stays agnostic |
 | Bootstrap stdout redirected to stderr | Keeps stdout clean for path output that the shell function reads for auto-cd |
 

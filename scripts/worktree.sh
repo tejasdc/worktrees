@@ -93,9 +93,10 @@ is_cwd_inside() {
 
 # ─── File Discovery ──────────────────────────────────────────────────────────
 #
-# Finds gitignored files matching our patterns. Only copies files that are:
-# 1. Matching our patterns (.env*, *.pem, *.key, *.pub, keys/ dirs)
-# 2. Gitignored (local secrets, not tracked files the worktree already has)
+# Copies gitignored .env* files from the main repo to the new worktree.
+# Only copies files that are both matching .env* and gitignored.
+#
+# For project-specific files (keys, certs, etc.), use scripts/worktree-bootstrap.sh.
 
 discover_and_copy_files() {
   local repo_root="$1"
@@ -103,56 +104,22 @@ discover_and_copy_files() {
   local copied=0
 
   log ""
-  info "Discovering config files to copy..."
+  info "Copying .env files..."
   log ""
 
-  # Track copied paths to avoid double-copying
-  local -A copied_paths
-
-  # --- 1. Key directories (dirs named "keys/") — FIRST to get all files ---
-  while IFS= read -r dir; do
-    [ -z "$dir" ] && continue
-    if git -C "$repo_root" check-ignore -q "$dir" 2>/dev/null; then
-      copy_directory_preserving_structure "$repo_root" "$worktree_path" "$dir"
-      local file_count
-      file_count=$(find "$repo_root/$dir" -type f 2>/dev/null | wc -l | tr -d ' ')
-      copied=$((copied + file_count))
-      # Mark all files in this directory as already copied
-      while IFS= read -r f; do
-        copied_paths["${f#./}"]=1
-      done < <(cd "$repo_root" && find "$dir" -type f 2>/dev/null)
-    fi
-  done < <(cd "$repo_root" && find . -maxdepth 3 -type d -name 'keys' 2>/dev/null)
-
-  # --- 2. Environment files (.env*) ---
   while IFS= read -r file; do
     [ -z "$file" ] && continue
-    local clean_path="${file#./}"
-    [ -n "${copied_paths[$clean_path]+x}" ] && continue
     if git -C "$repo_root" check-ignore -q "$file" 2>/dev/null; then
       copy_file_preserving_structure "$repo_root" "$worktree_path" "$file"
       copied=$((copied + 1))
-      copied_paths["$clean_path"]=1
     fi
   done < <(cd "$repo_root" && find . -maxdepth 3 -name '.env*' ! -name '.env.example' -type f 2>/dev/null)
 
-  # --- 3. Key/certificate files (*.pem, *.key, *.pub) — skip if already in a keys/ dir ---
-  while IFS= read -r file; do
-    [ -z "$file" ] && continue
-    local clean_path="${file#./}"
-    [ -n "${copied_paths[$clean_path]+x}" ] && continue
-    if git -C "$repo_root" check-ignore -q "$file" 2>/dev/null; then
-      copy_file_preserving_structure "$repo_root" "$worktree_path" "$file"
-      copied=$((copied + 1))
-      copied_paths["$clean_path"]=1
-    fi
-  done < <(cd "$repo_root" && find . -maxdepth 3 \( -name '*.pem' -o -name '*.key' -o -name '*.pub' \) -type f 2>/dev/null)
-
   log ""
   if [ $copied -gt 0 ]; then
-    success "Copied $copied config file(s)"
+    success "Copied $copied .env file(s)"
   else
-    warn "No gitignored config files found to copy"
+    warn "No gitignored .env files found to copy"
   fi
 }
 
@@ -183,35 +150,6 @@ copy_file_preserving_structure() {
     chmod "$(stat -f '%Lp' "$source" 2>/dev/null || stat -c '%a' "$source" 2>/dev/null)" "$dest" 2>/dev/null || true
 
   log "  ${GREEN}copy${NC}  $relative_path"
-}
-
-copy_directory_preserving_structure() {
-  local repo_root="$1"
-  local worktree_path="$2"
-  local relative_path="$3"
-
-  # Strip leading ./ if present
-  relative_path="${relative_path#./}"
-
-  local source="$repo_root/$relative_path"
-  local dest="$worktree_path/$relative_path"
-  local dest_parent
-  dest_parent=$(dirname "$dest")
-
-  if [ -d "$dest" ]; then
-    log "  ${DIM}skip${NC}  $relative_path/ (already exists)"
-    return
-  fi
-
-  mkdir -p "$dest_parent"
-  cp -R -P "$source" "$dest"
-
-  # Preserve permissions for all files in the directory
-  find "$dest" -type f -exec chmod 600 {} \; 2>/dev/null || true
-
-  local count
-  count=$(find "$dest" -type f | wc -l | tr -d ' ')
-  log "  ${GREEN}copy${NC}  $relative_path/ ($count files)"
 }
 
 # ─── Gitignore Check ─────────────────────────────────────────────────────────
@@ -571,12 +509,9 @@ Usage:
 What happens on create:
   1. Creates a git worktree at .worktrees/<name>/
   2. Creates branch worktree-<name> from origin/main
-  3. Discovers and copies gitignored config files:
-     - .env* files (any depth, max 3 levels)
-     - *.pem, *.key, *.pub files
-     - Directories named "keys/"
-  4. Prints the worktree path (shell function auto-cd's)
-  5. Runs scripts/worktree-bootstrap.sh if present (installs deps, generates env)
+  3. Copies gitignored .env* files from main repo
+  4. Runs scripts/worktree-bootstrap.sh if present (project-specific setup)
+  5. Prints the worktree path (shell function auto-cd's)
 
 What happens on cleanup:
   - Only removes worktrees whose branches are merged into main
