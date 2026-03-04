@@ -37,9 +37,16 @@ Requires bash 4+ (macOS: `brew install bash`).
    - `.env*` files (max 3 levels deep, excludes `.env.example`)
    - `*.pem`, `*.key`, `*.pub` files
    - Directories named `keys/`
-4. Prints the worktree path (shell function auto-cd's)
+4. Runs `scripts/worktree-bootstrap.sh` if present (project-specific setup)
+5. Prints the worktree path (shell function auto-cd's)
 
 Only copies files that are **both** matching the patterns **and** gitignored (local secrets, not tracked files).
+
+### Project Bootstrap Hook
+
+If the repo contains `scripts/worktree-bootstrap.sh`, it runs automatically after file copying. This lets each project define its own setup — install dependencies, generate Prisma clients, allocate dev server ports, etc.
+
+The bootstrap script is **project-owned** (lives in the repo, not in `wt`). The `wt` tool just looks for and runs it. This keeps `wt` project-agnostic.
 
 ### List (`wt list`)
 
@@ -78,6 +85,8 @@ Shell function       Claude hook
 | No `create` subcommand | `wt my-feature` is cleaner than `wt create my-feature` |
 | Defer node_modules copy | Agents install when they need to build/test; saves 3-5 min on creation |
 | Dynamic file discovery via `git check-ignore` | Workspace-agnostic; works with any repo layout |
+| Bootstrap hook via convention (`scripts/worktree-bootstrap.sh`) | Project owns its setup; `wt` stays agnostic |
+| Bootstrap stdout redirected to stderr | Keeps stdout clean for path output that the shell function reads for auto-cd |
 
 ## File Structure
 
