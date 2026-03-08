@@ -6,6 +6,7 @@
 #   worktree.sh <name>              Create a new worktree
 #   worktree.sh list                List all worktrees with status
 #   worktree.sh cleanup             Remove worktrees whose branches are merged
+#   worktree.sh delete <name>       Force-remove a worktree (even if unmerged)
 #
 # Designed to be workspace-agnostic. Works with any git repo.
 # All user-facing output goes to stderr. Only the worktree path goes to stdout
@@ -55,7 +56,29 @@ get_repo_root() {
 }
 
 get_worktree_dir() {
-  echo "$(get_repo_root)/.worktrees"
+  echo "$(get_repo_root)/.wt"
+}
+
+# Returns all worktree directories that exist (current .wt + legacy .worktrees)
+# Outputs one path per line (safe for paths with spaces)
+get_all_worktree_dirs() {
+  local repo_root="$1"
+  [ -d "$repo_root/.wt" ] && printf '%s\n' "$repo_root/.wt"
+  [ -d "$repo_root/.worktrees" ] && printf '%s\n' "$repo_root/.worktrees"
+  return 0
+}
+
+# Find a worktree by name across both .wt and .worktrees
+find_worktree_path() {
+  local repo_root="$1"
+  local name="$2"
+  for dir in "$repo_root/.wt" "$repo_root/.worktrees"; do
+    if [ -d "$dir/$name" ] && [ -e "$dir/$name/.git" ]; then
+      echo "$dir/$name"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Resolve the merge target ref (origin/main, origin/master, or fallback to HEAD)
@@ -158,14 +181,11 @@ ensure_gitignored() {
   local repo_root="$1"
   local gitignore="$repo_root/.gitignore"
 
-  if git -C "$repo_root" check-ignore -q ".worktrees/" 2>/dev/null; then
-    return 0
+  if ! git -C "$repo_root" check-ignore -q ".wt/" 2>/dev/null; then
+    warn ".wt/ is not in .gitignore — adding it"
+    echo ".wt/" >> "$gitignore"
+    success "Added .wt/ to .gitignore"
   fi
-
-  # .worktrees is not gitignored — add it
-  warn ".worktrees/ is not in .gitignore — adding it"
-  echo ".worktrees/" >> "$gitignore"
-  success "Added .worktrees/ to .gitignore"
 }
 
 # ─── Create Command ──────────────────────────────────────────────────────────
@@ -213,12 +233,12 @@ cmd_create() {
   log "  Base:      origin/main"
   log ""
 
-  # Check if worktree already exists
-  if [ -d "$worktree_path" ]; then
-    # It exists — just print the path so wt() can cd into it
-    warn "Worktree '$name' already exists at $worktree_path"
+  # Check if worktree already exists (in .wt or legacy .worktrees)
+  local existing_path
+  if existing_path=$(find_worktree_path "$repo_root" "$name"); then
+    warn "Worktree '$name' already exists at $existing_path"
     warn "Switching to existing worktree"
-    echo "$worktree_path"
+    echo "$existing_path"
     exit 0
   fi
 
@@ -229,7 +249,7 @@ cmd_create() {
     exit 1
   fi
 
-  # Ensure .worktrees/ is gitignored
+  # Ensure .wt/ is gitignored
   ensure_gitignored "$repo_root"
 
   # Fetch latest main
@@ -310,8 +330,6 @@ cmd_list() {
     exit 1
   fi
 
-  local worktree_dir
-  worktree_dir=$(get_worktree_dir)
   local repo_name
   repo_name=$(basename "$repo_root")
 
@@ -319,7 +337,11 @@ cmd_list() {
   log "${BOLD}Worktrees in $repo_name${NC}"
   log "${DIM}────────────────────────────────────────${NC}"
 
-  if [ ! -d "$worktree_dir" ]; then
+  # Collect all worktree directories (current + legacy)
+  local -a wt_dirs
+  mapfile -t wt_dirs < <(get_all_worktree_dirs "$repo_root")
+
+  if [ ${#wt_dirs[@]} -eq 0 ]; then
     log "  ${DIM}No worktrees found${NC}"
     log ""
     log "  Create one with: ${BLUE}wt my-feature${NC}"
@@ -337,62 +359,70 @@ cmd_list() {
   local count=0
   local merged_count=0
 
-  for wt_path in "$worktree_dir"/*/; do
-    [ ! -d "$wt_path" ] && continue
-    # Check it's actually a git worktree (has .git file)
-    [ ! -e "$wt_path/.git" ] && continue
+  for worktree_dir in "${wt_dirs[@]}"; do
+    for wt_path in "$worktree_dir"/*/; do
+      [ ! -d "$wt_path" ] && continue
+      # Check it's actually a git worktree (has .git file)
+      [ ! -e "$wt_path/.git" ] && continue
 
-    count=$((count + 1))
-    local wt_name
-    wt_name=$(basename "$wt_path")
-    local branch
-    branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+      count=$((count + 1))
+      local wt_name
+      wt_name=$(basename "$wt_path")
+      local branch
+      branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
-    # Check if merged into main
-    local merge_status
-    if is_branch_merged "$repo_root" "$branch" "$merge_target"; then
-      merge_status="${GREEN}merged${NC}"
-      merged_count=$((merged_count + 1))
-    else
-      # Check if branch has been pushed to remote
-      if ! git -C "$repo_root" rev-parse --verify "origin/$branch" &>/dev/null; then
-        # Remote branch doesn't exist — never pushed
-        local local_commits
-        local_commits=$(count_commits "$wt_path" "$merge_target..HEAD")
-        if [ "$local_commits" -gt 0 ] 2>/dev/null; then
-          merge_status="${YELLOW}active${NC} ($local_commits unpushed)"
-        else
-          merge_status="${DIM}empty${NC} (no changes)"
-        fi
+      # Check if merged into main
+      local merge_status
+      if is_branch_merged "$repo_root" "$branch" "$merge_target"; then
+        merge_status="${GREEN}merged${NC}"
+        merged_count=$((merged_count + 1))
       else
-        # Remote branch exists — check if local is ahead
-        local unpushed
-        unpushed=$(count_commits "$wt_path" "origin/$branch..HEAD")
-        if [ "$unpushed" -gt 0 ] 2>/dev/null; then
-          merge_status="${YELLOW}active${NC} ($unpushed unpushed)"
-        else
-          local ahead
-          ahead=$(count_commits "$wt_path" "$merge_target..HEAD")
-          if [ "$ahead" -gt 0 ] 2>/dev/null; then
-            merge_status="${BLUE}pushed${NC} ($ahead commits ahead of main)"
+        # Check if branch has been pushed to remote
+        if ! git -C "$repo_root" rev-parse --verify "origin/$branch" &>/dev/null; then
+          # Remote branch doesn't exist — never pushed
+          local local_commits
+          local_commits=$(count_commits "$wt_path" "$merge_target..HEAD")
+          if [ "$local_commits" -gt 0 ] 2>/dev/null; then
+            merge_status="${YELLOW}active${NC} ($local_commits unpushed)"
           else
             merge_status="${DIM}empty${NC} (no changes)"
           fi
+        else
+          # Remote branch exists — check if local is ahead
+          local unpushed
+          unpushed=$(count_commits "$wt_path" "origin/$branch..HEAD")
+          if [ "$unpushed" -gt 0 ] 2>/dev/null; then
+            merge_status="${YELLOW}active${NC} ($unpushed unpushed)"
+          else
+            local ahead
+            ahead=$(count_commits "$wt_path" "$merge_target..HEAD")
+            if [ "$ahead" -gt 0 ] 2>/dev/null; then
+              merge_status="${BLUE}pushed${NC} ($ahead commits ahead of main)"
+            else
+              merge_status="${DIM}empty${NC} (no changes)"
+            fi
+          fi
         fi
       fi
-    fi
 
-    # Check if this is our current directory
-    local current_marker=""
-    if is_cwd_inside "$wt_path" 2>/dev/null; then
-      current_marker=" ${GREEN}(current)${NC}"
-    fi
+      # Check if this is our current directory
+      local current_marker=""
+      if is_cwd_inside "$wt_path" 2>/dev/null; then
+        current_marker=" ${GREEN}(current)${NC}"
+      fi
 
-    log "  ${BOLD}$wt_name${NC}${current_marker}"
-    log "    Branch: $branch"
-    log "    Status: $merge_status"
-    log "    Path:   $wt_path"
-    log ""
+      # Show legacy marker for .worktrees paths
+      local legacy_marker=""
+      if [[ "$worktree_dir" == */.worktrees ]]; then
+        legacy_marker=" ${DIM}(legacy)${NC}"
+      fi
+
+      log "  ${BOLD}$wt_name${NC}${current_marker}${legacy_marker}"
+      log "    Branch: $branch"
+      log "    Status: $merge_status"
+      log "    Path:   $wt_path"
+      log ""
+    done
   done
 
   if [ $count -eq 0 ]; then
@@ -419,10 +449,11 @@ cmd_cleanup() {
     exit 1
   fi
 
-  local worktree_dir
-  worktree_dir=$(get_worktree_dir)
+  # Collect all worktree directories (current + legacy)
+  local -a wt_dirs
+  mapfile -t wt_dirs < <(get_all_worktree_dirs "$repo_root")
 
-  if [ ! -d "$worktree_dir" ]; then
+  if [ ${#wt_dirs[@]} -eq 0 ]; then
     info "No worktrees to clean up"
     return
   fi
@@ -441,37 +472,39 @@ cmd_cleanup() {
   local removed=0
   local kept=0
 
-  for wt_path in "$worktree_dir"/*/; do
-    [ ! -d "$wt_path" ] && continue
-    [ ! -e "$wt_path/.git" ] && continue
+  for worktree_dir in "${wt_dirs[@]}"; do
+    for wt_path in "$worktree_dir"/*/; do
+      [ ! -d "$wt_path" ] && continue
+      [ ! -e "$wt_path/.git" ] && continue
 
-    local wt_name
-    wt_name=$(basename "$wt_path")
-    local branch
-    branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+      local wt_name
+      wt_name=$(basename "$wt_path")
+      local branch
+      branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
-    # Skip if we're currently inside this worktree (or a subdirectory of it)
-    if is_cwd_inside "$wt_path" 2>/dev/null; then
-      warn "  skip  $wt_name (you are currently in this worktree)"
-      kept=$((kept + 1))
-      continue
-    fi
+      # Skip if we're currently inside this worktree (or a subdirectory of it)
+      if is_cwd_inside "$wt_path" 2>/dev/null; then
+        warn "  skip  $wt_name (you are currently in this worktree)"
+        kept=$((kept + 1))
+        continue
+      fi
 
-    # Check if branch is merged into main
-    if is_branch_merged "$repo_root" "$branch" "$merge_target"; then
-      # Merged — safe to remove
-      if git -C "$repo_root" worktree remove --force "$wt_path" 2>/dev/null; then
-        git -C "$repo_root" branch -d "$branch" >/dev/null 2>&1 || true
-        success "  remove  $wt_name (branch $branch merged)"
-        removed=$((removed + 1))
+      # Check if branch is merged into main
+      if is_branch_merged "$repo_root" "$branch" "$merge_target"; then
+        # Merged — safe to remove
+        if git -C "$repo_root" worktree remove --force "$wt_path" 2>/dev/null; then
+          git -C "$repo_root" branch -d "$branch" >/dev/null 2>&1 || true
+          success "  remove  $wt_name (branch $branch merged)"
+          removed=$((removed + 1))
+        else
+          warn "  skip  $wt_name (failed to remove worktree)"
+          kept=$((kept + 1))
+        fi
       else
-        warn "  skip  $wt_name (failed to remove worktree)"
+        log "  ${DIM}keep${NC}    $wt_name (branch $branch not merged)"
         kept=$((kept + 1))
       fi
-    else
-      log "  ${DIM}keep${NC}    $wt_name (branch $branch not merged)"
-      kept=$((kept + 1))
-    fi
+    done
   done
 
   log ""
@@ -486,11 +519,85 @@ cmd_cleanup() {
     info "No worktrees to clean up"
   fi
 
-  # Clean up empty .worktrees directory
-  if [ -d "$worktree_dir" ] && [ -z "$(ls -A "$worktree_dir" 2>/dev/null)" ]; then
-    rmdir "$worktree_dir" 2>/dev/null || true
+  # Clean up empty worktree directories
+  for worktree_dir in "$repo_root/.wt" "$repo_root/.worktrees"; do
+    if [ -d "$worktree_dir" ] && [ -z "$(ls -A "$worktree_dir" 2>/dev/null)" ]; then
+      rmdir "$worktree_dir" 2>/dev/null || true
+    fi
+  done
+
+  log ""
+}
+
+# ─── Delete Command ──────────────────────────────────────────────────────────
+
+cmd_delete() {
+  local name="${1:-}"
+
+  if [ -z "$name" ]; then
+    error "Error: worktree name required"
+    error "Usage: wt delete <name>"
+    exit 1
   fi
 
+  local repo_root
+  repo_root=$(get_repo_root)
+  if [ -z "$repo_root" ]; then
+    error "Error: not inside a git repository"
+    exit 1
+  fi
+
+  # Find the worktree across both directories
+  local wt_path
+  if ! wt_path=$(find_worktree_path "$repo_root" "$name"); then
+    error "Error: worktree '$name' not found"
+    error "Run 'wt list' to see available worktrees"
+    exit 1
+  fi
+
+  local branch
+  branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+  # Refuse to delete if we're inside it
+  if is_cwd_inside "$wt_path" 2>/dev/null; then
+    error "Error: you are currently inside worktree '$name'"
+    error "cd out of it first, then run: wt delete $name"
+    exit 1
+  fi
+
+  log ""
+  log "${BOLD}Deleting worktree: $name${NC}"
+  log "${DIM}────────────────────────────────────────${NC}"
+  log "  Branch:  $branch"
+  log "  Path:    $wt_path"
+  log ""
+
+  # Remove the worktree
+  if git -C "$repo_root" worktree remove --force "$wt_path" 2>/dev/null; then
+    success "Worktree removed"
+  else
+    error "Failed to remove worktree — trying harder..."
+    # Force cleanup: remove directory and prune
+    rm -rf "$wt_path"
+    git -C "$repo_root" worktree prune 2>/dev/null || true
+    success "Worktree force-removed"
+  fi
+
+  # Delete the branch (force, since it may be unmerged)
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+    git -C "$repo_root" branch -D "$branch" >/dev/null 2>&1 || true
+    success "Branch '$branch' deleted"
+  fi
+
+  # Clean up empty parent directories
+  local parent_dir
+  parent_dir=$(dirname "$wt_path")
+  if [ -d "$parent_dir" ] && [ -z "$(ls -A "$parent_dir" 2>/dev/null)" ]; then
+    rmdir "$parent_dir" 2>/dev/null || true
+  fi
+
+  log ""
+  success "Done — worktree '$name' deleted"
   log ""
 }
 
@@ -504,10 +611,11 @@ Usage:
   wt <name>              Create a new worktree and cd into it
   wt list                List all worktrees with branch and merge status
   wt cleanup             Remove worktrees whose branches are merged into main
+  wt delete <name>       Force-remove a worktree (even if unmerged)
   wt help                Show this help
 
 What happens on create:
-  1. Creates a git worktree at .worktrees/<name>/
+  1. Creates a git worktree at .wt/<name>/
   2. Creates branch worktree-<name> from origin/main
   3. Copies gitignored .env* files from main repo
   4. Runs scripts/worktree-bootstrap.sh if present (project-specific setup)
@@ -517,10 +625,17 @@ What happens on cleanup:
   - Only removes worktrees whose branches are merged into main
   - Unmerged worktrees are kept (safe by default)
 
+What happens on delete:
+  - Force-removes the worktree and its branch regardless of merge status
+  - Refuses if you're currently inside the worktree
+
+Note: list, cleanup, and delete scan both .wt/ and legacy .worktrees/ directories.
+
 Examples:
   wt auth-refactor       Create worktree for auth work
   wt list                See all worktrees and their status
   wt cleanup             Remove merged worktrees
+  wt delete old-feature  Force-remove a worktree
 
 EOF
 }
@@ -541,6 +656,9 @@ main() {
       ;;
     cleanup|clean)
       cmd_cleanup
+      ;;
+    delete|rm)
+      cmd_delete "${2:-}"
       ;;
     help|--help|-h)
       cmd_help

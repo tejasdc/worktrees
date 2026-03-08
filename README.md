@@ -6,6 +6,7 @@ Single-command worktree creation with automatic `.env` copying and project boots
 wt my-feature            # Create worktree, copy .env, run bootstrap, cd into it
 wt list                  # Show all worktrees with merge status
 wt cleanup               # Remove worktrees whose branches are merged
+wt delete old-feature    # Force-remove a worktree (even if unmerged)
 ```
 
 ## Why
@@ -31,7 +32,7 @@ Requires bash 4+ (macOS: `brew install bash`).
 
 ### Create (`wt <name>`)
 
-1. Creates git worktree at `.worktrees/<name>/`
+1. Creates git worktree at `.wt/<name>/`
 2. Creates branch `worktree-<name>` from `origin/main`
 3. Copies gitignored `.env*` files from the main repo (excludes `.env.example`)
 4. Runs `scripts/worktree-bootstrap.sh` if present (project-specific setup)
@@ -51,17 +52,64 @@ If the repo contains `scripts/worktree-bootstrap.sh`, it runs automatically afte
 
 The bootstrap script is **project-owned** (lives in the repo, not in `wt`). The `wt` tool just looks for and runs it. This keeps `wt` project-agnostic.
 
+#### Writing a Good Bootstrap Script
+
+The bootstrap script receives no arguments. It should figure out everything from its own location:
+
+```bash
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"   # Worktree root
+```
+
+**What the bootstrap script needs to handle:**
+
+1. **Dependencies** — `npm install`, `bundle install`, etc. The worktree is a fresh checkout with no `node_modules/`.
+2. **Generated files** — Prisma client, protobuf stubs, etc. These aren't in git.
+3. **Project-specific secrets** — SSH keys, certificates, etc. Copy them from the main repo:
+   ```bash
+   COMMON_GIT_DIR="$(git -C "$ROOT" rev-parse --git-common-dir)"
+   MAIN_REPO="${COMMON_GIT_DIR%/.git}"
+   cp -R "$MAIN_REPO/backend/keys" "$ROOT/backend/keys"
+   ```
+4. **Port allocation** — If your project runs dev servers, each worktree needs unique ports to avoid conflicts. Use a hash of the worktree name:
+   ```bash
+   RAW_HASH="$(printf '%s' "$(basename "$ROOT")" | cksum | awk '{print $1}')"
+   PORT_OFFSET=$((RAW_HASH % 1000 + 1))
+   PORT=$((4001 + PORT_OFFSET))
+   ```
+5. **Environment file** — Write a `.worktree-env` that server scripts can source:
+   ```bash
+   cat >"$ROOT/.worktree-env" <<EOF
+   export PORT="$PORT"
+   export VITE_PORT="$VITE_PORT"
+   EOF
+   ```
+
+**How to detect you're in a worktree** (not the main repo):
+```bash
+if [[ "$ROOT" == */.wt/* || "$ROOT" == */.worktrees/* ]]; then
+  # Running inside a worktree — generate .worktree-env
+fi
+```
+
+**All output should go to stderr** (or stdout is fine — `wt` redirects bootstrap stdout to stderr). The important thing is that `wt` captures only the worktree path on stdout for the auto-cd shell function.
+
 ### List (`wt list`)
 
 Shows all worktrees with status:
-- **merged** — branch is merged into main, safe to clean up
+- **merged** — branch is an ancestor of `origin/main` (i.e., its PR was merged), safe to clean up
 - **active** (N unpushed) — has local commits not pushed
 - **pushed** (N commits ahead) — pushed but not yet merged
 - **empty** — no changes from main
 
+Legacy worktrees (in `.worktrees/`) show a `(legacy)` marker. They work normally — they're just in the old directory.
+
 ### Cleanup (`wt cleanup`)
 
-Removes only worktrees whose branches are merged into main. Unmerged worktrees are always kept.
+Removes only worktrees whose branches are merged into `origin/main`. Unmerged worktrees are always kept. Scans both `.wt/` and legacy `.worktrees/`.
+
+### Delete (`wt delete <name>`)
+
+Force-removes a worktree and its branch regardless of merge status. Use when you want to discard a worktree you no longer need. Refuses if you're currently inside the worktree. Also aliased as `wt rm <name>`.
 
 ## How It Works
 
@@ -76,15 +124,18 @@ Shell function       Claude hook
 - **Workspace-agnostic** — works with any git repo, no hardcoded paths
 - **Tool-agnostic** — works with Claude, Codex, Cursor, or manual terminal use
 - **stdout/stderr discipline** — user output to stderr, machine output (path) to stdout
-- **Works from inside worktrees** — `wt second-feature` from inside `.worktrees/first-feature/` correctly creates at the main repo root
+- **Works from inside worktrees** — `wt second-feature` from inside `.wt/first-feature/` correctly creates at the main repo root
+- **Backwards compatible** — `list`, `cleanup`, and `delete` scan both `.wt/` and legacy `.worktrees/` directories
 
 ## Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
+| `.wt/` directory name | Short to type; `.worktrees/` conflicted with `.workspaces/` tab completion |
 | Branch from `origin/main` (not HEAD) | Prevents cascading dependencies between worktrees |
 | `worktree-` branch prefix | Prevents collisions with real branches |
 | Merge-gated cleanup only | Auto-merging is dangerous; only clean up what's merged |
+| `delete` for force removal | Explicit command for intentional discards, separate from safe `cleanup` |
 | No `create` subcommand | `wt my-feature` is cleaner than `wt create my-feature` |
 | Only copy `.env*` (not keys/certs) | `.env` is universal; project-specific files belong in the bootstrap script |
 | Bootstrap hook via convention (`scripts/worktree-bootstrap.sh`) | Project owns its setup; `wt` stays agnostic |

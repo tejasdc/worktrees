@@ -38,6 +38,7 @@ wt() {
   # For create (default command), capture the path and cd into it
   if [ $# -ge 1 ] && [ "$1" != "list" ] && [ "$1" != "ls" ] && \
      [ "$1" != "cleanup" ] && [ "$1" != "clean" ] && \
+     [ "$1" != "delete" ] && [ "$1" != "rm" ] && \
      [ "$1" != "help" ] && [ "$1" != "--help" ] && [ "$1" != "-h" ]; then
     local output
     output=$(worktree.sh "$@")
