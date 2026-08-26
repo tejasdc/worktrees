@@ -4,6 +4,7 @@ Single-command worktree creation with automatic `.env` copying and project boots
 
 ```bash
 wt my-feature            # Create worktree, copy .env, run bootstrap, cd into it
+wt init                  # Scaffold this repo's one-time bootstrap hook
 wt list                  # Show all worktrees with merge status
 wt cleanup               # Remove worktrees whose branches are merged
 wt delete old-feature    # Force-remove a worktree (even if unmerged)
@@ -32,11 +33,14 @@ Requires bash 4+ (macOS: `brew install bash`).
 
 ### Create (`wt <name>`)
 
-1. Creates git worktree at `.wt/<name>/`
+1. Creates git worktree at `.wt/<name>/` and ignores that container through the repository-local Git exclude (no tracked `.gitignore` edit)
 2. Creates branch `worktree-<name>` from `origin/main`
 3. Copies gitignored `.env*` files from the main repo (excludes `.env.example`)
 4. Runs `scripts/worktree-bootstrap.sh` if present (project-specific setup)
 5. Prints the worktree path (shell function auto-cd's)
+
+If the committed project bootstrap fails, creation returns its nonzero status and preserves
+the worktree for diagnosis. It does not print the normal “Ready” success message.
 
 Only copies `.env*` files that are gitignored (local secrets, not tracked files the worktree already has).
 
@@ -52,6 +56,11 @@ If the repo contains `scripts/worktree-bootstrap.sh`, it runs automatically afte
 
 The bootstrap script is **project-owned** (lives in the repo, not in `wt`). The `wt` tool just looks for and runs it. This keeps `wt` project-agnostic.
 
+For a repository that needs setup, run `wt init` once. It creates a safe scaffold at
+`scripts/worktree-bootstrap.sh` and adds `/.worktree-env` to `.gitignore`; it never
+overwrites an existing bootstrap. Adapt the scaffold to the repository and commit it.
+Ordinary `wt <name>` usage does not require any setup skill or project analysis after that.
+
 #### Writing a Good Bootstrap Script
 
 The bootstrap script receives no arguments. It should figure out everything from its own location:
@@ -62,7 +71,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"   # Worktree root
 
 **What the bootstrap script needs to handle:**
 
-1. **Dependencies** — `npm install`, `bundle install`, etc. The worktree is a fresh checkout with no `node_modules/`.
+1. **Dependencies** — use the repository's lockfile-respecting install command (`npm ci`, `pnpm install --frozen-lockfile`, `uv sync --frozen`, etc.). “Frozen” here means reproduce the committed lockfile; it does not affect running agents or deployment admission.
 2. **Generated files** — Prisma client, protobuf stubs, etc. These aren't in git.
 3. **Project-specific secrets** — SSH keys, certificates, etc. Copy them from the main repo:
    ```bash
@@ -70,11 +79,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"   # Worktree root
    MAIN_REPO="${COMMON_GIT_DIR%/.git}"
    cp -R "$MAIN_REPO/backend/keys" "$ROOT/backend/keys"
    ```
-4. **Port allocation** — If your project runs dev servers, each worktree needs unique ports to avoid conflicts. Use a hash of the worktree name:
+4. **Port allocation** — If your project runs dev servers, each worktree needs stable, collision-resistant ports. The scaffold's `stable_port <base> [range]` helper hashes both the repository and worktree path:
    ```bash
-   RAW_HASH="$(printf '%s' "$(basename "$ROOT")" | cksum | awk '{print $1}')"
-   PORT_OFFSET=$((RAW_HASH % 1000 + 1))
-   PORT=$((4001 + PORT_OFFSET))
+   APP_PORT="$(stable_port 4001)"
    ```
 5. **Environment file** — Write a `.worktree-env` that server scripts can source:
    ```bash
@@ -148,6 +155,8 @@ worktrees/
 ├── scripts/
 │   ├── worktree.sh      # Main script (globally installed via symlink)
 │   └── install.sh       # Installer (symlink + shell function)
+├── templates/
+│   └── worktree-bootstrap.sh  # Scaffold copied by wt init
 └── docs/
     └── plans/
         └── worktree-manager-design.md   # Full design document

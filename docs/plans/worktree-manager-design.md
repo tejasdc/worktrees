@@ -1,7 +1,9 @@
 # Worktree Manager — Design Document
 
 **Date:** 2026-03-02
-**Status:** Implemented and published — https://github.com/tejasdc/worktrees
+**Status:** Historical design record. For the executable contract, use `README.md` and
+`scripts/worktree.sh`; later implementation moved storage to `.wt/`, limited automatic
+copying to ignored `.env*` files, and added a project-owned bootstrap hook.
 
 ---
 
@@ -124,6 +126,7 @@ The script lives at `scripts/worktree.sh` in the repo and is symlinked to `~/.lo
 
 ```bash
 wt my-feature            # Create worktree, copy config files, cd into it
+wt init                  # Scaffold project-owned dependency/port setup
 wt list                  # Show all worktrees with branch and merge status
 wt cleanup               # Remove all worktrees whose branches are merged into main
 ```
@@ -267,7 +270,15 @@ Core script with three commands + help, plus these key implementation details:
 
 ### Step 3: Auto-gitignore — DONE
 
-Script checks `git check-ignore -q .worktrees/` on every create. If not gitignored, appends `.worktrees/` to `.gitignore` automatically.
+The current script ignores `.wt/` through the repository's common Git `info/exclude`, so
+manager bookkeeping never dirties the shared checkout.
+
+### Project bootstrap scaffold — DONE
+
+`wt init` copies the manager-owned template into the current checkout as
+`scripts/worktree-bootstrap.sh` without overwriting an existing file. The generated hook
+becomes project-owned and is where that repository defines deterministic dependency
+installation, generated artifacts, local config, and stable per-worktree ports.
 
 ### Step 4: Testing — DONE
 
@@ -298,7 +309,10 @@ Thin wrapper calling `worktree.sh` (found via PATH). Deferred until core script 
 
 1. **`.worktreerc` config file** — For projects that need additional files copied beyond .env and keys. Deferred until we hit a case that needs it.
 2. **APFS copy-on-write for node_modules** — `cp -c` for near-instant cloning on macOS. Deferred since agents install on demand.
-3. **Deterministic port assignment** — Hash branch name to assign unique dev server ports per worktree. Not needed yet.
+3. ~~**Deterministic port assignment**~~ — **DONE in the bootstrap scaffold.** Projects opt
+   into stable, collision-resistant ports with `stable_port`; service-specific port names
+   and availability checks remain project-owned.
 4. ~~**`wt resume my-feature`** — cd back into an existing worktree without recreating.~~ **DONE** — creation is idempotent. Running `wt my-feature` when it already exists prints the path and the shell function cd's into it.
-5. ~~**Auto-gitignore for new repos** — Script could create `.worktrees/` entry in `.gitignore` automatically on first use.~~ **DONE** — `ensure_gitignored()` checks and auto-adds on every create.
+5. ~~**Auto-gitignore for new repos**~~ **DONE** — `.wt/` is added to the local Git exclude,
+   not the tracked `.gitignore`.
 6. **Claude --worktree default** — GitHub issue #27616 requests a settings.json option. When available, could replace the shell alias for Claude users.

@@ -4,6 +4,7 @@
 #
 # Usage:
 #   worktree.sh <name>              Create a new worktree
+#   worktree.sh init                Add a project bootstrap scaffold
 #   worktree.sh list                List all worktrees with status
 #   worktree.sh cleanup             Remove worktrees whose branches are merged
 #   worktree.sh delete <name>       Force-remove a worktree (even if unmerged)
@@ -37,6 +38,19 @@ info()    { log "${BLUE}$*${NC}"; }
 success() { log "${GREEN}$*${NC}"; }
 warn()    { log "${YELLOW}$*${NC}"; }
 error()   { log "${RED}$*${NC}"; }
+
+get_script_dir() {
+  local source="${BASH_SOURCE[0]}"
+  local source_dir
+
+  while [ -L "$source" ]; do
+    source_dir=$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)
+    source=$(readlink "$source")
+    [[ "$source" != /* ]] && source="$source_dir/$source"
+  done
+
+  cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd
+}
 
 get_repo_root() {
   # If we're inside a worktree, resolve to the MAIN repo root (not the worktree root).
@@ -179,13 +193,55 @@ copy_file_preserving_structure() {
 
 ensure_gitignored() {
   local repo_root="$1"
-  local gitignore="$repo_root/.gitignore"
+  local common_git_dir
+  common_git_dir=$(git -C "$repo_root" rev-parse --git-common-dir)
+  if [[ "$common_git_dir" != /* ]]; then
+    common_git_dir="$repo_root/${common_git_dir#./}"
+  fi
+  local local_exclude="$common_git_dir/info/exclude"
 
   if ! git -C "$repo_root" check-ignore -q ".wt/" 2>/dev/null; then
-    warn ".wt/ is not in .gitignore — adding it"
-    echo ".wt/" >> "$gitignore"
-    success "Added .wt/ to .gitignore"
+    mkdir -p "$(dirname "$local_exclude")"
+    printf '\n/.wt/\n' >> "$local_exclude"
+    success "Ignored .wt/ in this repository's local Git exclude"
   fi
+}
+
+# ─── Init Command ────────────────────────────────────────────────────────────
+
+cmd_init() {
+  local project_root
+  project_root=$(git rev-parse --show-toplevel 2>/dev/null) || true
+  if [ -z "$project_root" ]; then
+    error "Error: not inside a git repository"
+    exit 1
+  fi
+
+  local bootstrap_script="$project_root/scripts/worktree-bootstrap.sh"
+  if [ -e "$bootstrap_script" ]; then
+    warn "Bootstrap already exists: $bootstrap_script"
+    warn "No files changed"
+    return 0
+  fi
+
+  local template_path
+  template_path="$(get_script_dir)/../templates/worktree-bootstrap.sh"
+  if [ ! -f "$template_path" ]; then
+    error "Error: bootstrap template not found: $template_path"
+    error "Reinstall wt from the canonical worktrees checkout"
+    exit 1
+  fi
+
+  mkdir -p "$(dirname "$bootstrap_script")"
+  cp "$template_path" "$bootstrap_script"
+  chmod +x "$bootstrap_script"
+
+  if ! git -C "$project_root" check-ignore -q ".worktree-env" 2>/dev/null; then
+    printf '\n/.worktree-env\n' >> "$project_root/.gitignore"
+  fi
+
+  success "Created scripts/worktree-bootstrap.sh"
+  info "Adapt it to this repository, then commit it with /.worktree-env in .gitignore"
 }
 
 # ─── Create Command ──────────────────────────────────────────────────────────
@@ -295,8 +351,10 @@ cmd_create() {
     if bash "$bootstrap_script" >&2; then
       success "Project bootstrap completed"
     else
-      warn "Bootstrap script exited with errors (exit code $?)"
-      warn "You may need to run it manually: cd $worktree_path && bash scripts/worktree-bootstrap.sh"
+      local bootstrap_exit_code=$?
+      error "Bootstrap failed (exit code $bootstrap_exit_code); worktree preserved at $worktree_path"
+      error "Retry with: cd $worktree_path && bash scripts/worktree-bootstrap.sh"
+      exit "$bootstrap_exit_code"
     fi
   else
     log ""
@@ -609,6 +667,7 @@ worktree — Git worktree manager for parallel development
 
 Usage:
   wt <name>              Create a new worktree and cd into it
+  wt init                Add a project-owned bootstrap scaffold
   wt list                List all worktrees with branch and merge status
   wt cleanup             Remove worktrees whose branches are merged into main
   wt delete <name>       Force-remove a worktree (even if unmerged)
@@ -621,6 +680,11 @@ What happens on create:
   4. Runs scripts/worktree-bootstrap.sh if present (project-specific setup)
   5. Prints the worktree path (shell function auto-cd's)
 
+What happens on init:
+  - Copies the canonical scaffold to scripts/worktree-bootstrap.sh
+  - Adds /.worktree-env to .gitignore
+  - Never overwrites an existing bootstrap
+
 What happens on cleanup:
   - Only removes worktrees whose branches are merged into main
   - Unmerged worktrees are kept (safe by default)
@@ -632,6 +696,7 @@ What happens on delete:
 Note: list, cleanup, and delete scan both .wt/ and legacy .worktrees/ directories.
 
 Examples:
+  wt init                Scaffold first-time project setup
   wt auth-refactor       Create worktree for auth work
   wt list                See all worktrees and their status
   wt cleanup             Remove merged worktrees
@@ -651,6 +716,9 @@ main() {
   fi
 
   case "$command" in
+    init|setup)
+      cmd_init
+      ;;
     list|ls)
       cmd_list
       ;;

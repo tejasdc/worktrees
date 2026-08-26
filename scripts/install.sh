@@ -37,6 +37,7 @@ wt() {
 
   # For create (default command), capture the path and cd into it
   if [ $# -ge 1 ] && [ "$1" != "list" ] && [ "$1" != "ls" ] && \
+     [ "$1" != "init" ] && [ "$1" != "setup" ] && \
      [ "$1" != "cleanup" ] && [ "$1" != "clean" ] && \
      [ "$1" != "delete" ] && [ "$1" != "rm" ] && \
      [ "$1" != "help" ] && [ "$1" != "--help" ] && [ "$1" != "-h" ]; then
@@ -146,6 +147,7 @@ echo ""
 echo -e "  Reload your shell:  ${BLUE}source $SHELL_RC${NC}"
 echo ""
 echo -e "  Then try:"
+echo -e "    ${BLUE}wt init${NC}           Scaffold project bootstrap"
 echo -e "    ${BLUE}wt my-feature${NC}     Create a worktree"
 echo -e "    ${BLUE}wt list${NC}           List worktrees"
 echo -e "    ${BLUE}wt cleanup${NC}        Remove merged worktrees"
