@@ -4,6 +4,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MANAGER="$PROJECT_ROOT/scripts/worktree.sh"
+INSTALLER="$PROJECT_ROOT/scripts/install.sh"
 TEST_ROOT="$(mktemp -d)"
 
 cleanup() {
@@ -80,8 +81,27 @@ test_bootstrap_failure_is_terminal() {
   [ -d "$repository/.wt/broken" ] || fail "failed worktree was not preserved"
 }
 
+test_installer_exposes_wt_without_shell_rc() {
+  local test_home="$TEST_ROOT/installer-home"
+  mkdir -p "$test_home/.local/bin"
+  touch "$test_home/.zshrc"
+
+  HOME="$test_home" SHELL=/bin/zsh bash "$INSTALLER" >/dev/null
+  HOME="$test_home" SHELL=/bin/zsh bash "$INSTALLER" >/dev/null
+
+  [ -L "$test_home/.local/bin/wt" ] || fail "installer did not create the wt command"
+  [ -L "$test_home/.local/bin/worktree.sh" ] || fail "installer removed the compatibility command"
+  [ "$(PATH="$test_home/.local/bin:/usr/bin:/bin" command -v wt)" = "$test_home/.local/bin/wt" ] || \
+    fail "wt is not discoverable on PATH without sourcing a shell rc"
+  PATH="$test_home/.local/bin:/usr/bin:/bin" wt --help >/dev/null 2>&1 || \
+    fail "the installed wt command is not executable"
+  PATH="$test_home/.local/bin:/usr/bin:/bin" worktree.sh --help >/dev/null 2>&1 || \
+    fail "the compatibility worktree.sh command is not executable"
+}
+
 test_init_is_non_overwriting
 test_create_keeps_shared_checkout_clean
 test_bootstrap_failure_is_terminal
+test_installer_exposes_wt_without_shell_rc
 
 printf 'PASS: worktree manager focused tests\n'

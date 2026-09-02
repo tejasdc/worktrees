@@ -3,8 +3,8 @@
 # Install the worktree manager globally
 #
 # What this does:
-# 1. Symlinks worktree.sh to ~/.local/bin/worktree.sh
-# 2. Adds the `wt` shell function to ~/.zshrc (or ~/.bashrc)
+# 1. Symlinks the manager to ~/.local/bin/wt (and the legacy worktree.sh name)
+# 2. Adds the optional auto-cd `wt` shell function to ~/.zshrc (or ~/.bashrc)
 #
 # The `wt` function wraps the script to enable auto-cd into worktrees
 # (scripts can't change the parent shell's directory).
@@ -21,7 +21,8 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORKTREE_SCRIPT="$SCRIPT_DIR/worktree.sh"
-INSTALL_PATH="$HOME/.local/bin/worktree.sh"
+WORKTREE_INSTALL_PATH="$HOME/.local/bin/worktree.sh"
+WT_INSTALL_PATH="$HOME/.local/bin/wt"
 
 # ─── Shell Function Definition ───────────────────────────────────────────────
 
@@ -72,23 +73,35 @@ echo ""
 echo -e "${BOLD}Installing worktree manager${NC}"
 echo -e "${DIM}────────────────────────────────────────${NC}"
 
-# Step 1: Symlink script to ~/.local/bin
+# Step 1: Symlink commands to ~/.local/bin
 echo ""
-echo -e "${BLUE}Step 1: Installing script${NC}"
+echo -e "${BLUE}Step 1: Installing commands${NC}"
 
 mkdir -p "$HOME/.local/bin"
 
-if [ -L "$INSTALL_PATH" ]; then
-  # Already a symlink — update it
-  rm "$INSTALL_PATH"
-  echo -e "  ${YELLOW}Updating existing symlink${NC}"
-elif [ -f "$INSTALL_PATH" ]; then
-  echo -e "  ${YELLOW}Replacing existing file at $INSTALL_PATH${NC}"
-  rm "$INSTALL_PATH"
-fi
+install_command() {
+  local install_path="$1"
+  local temporary_directory
 
-ln -s "$WORKTREE_SCRIPT" "$INSTALL_PATH"
-echo -e "  ${GREEN}Symlinked:${NC} $INSTALL_PATH → $WORKTREE_SCRIPT"
+  if [ -L "$install_path" ]; then
+    echo -e "  ${YELLOW}Updating existing symlink:${NC} $install_path"
+  elif [ -e "$install_path" ]; then
+    if [ ! -f "$install_path" ]; then
+      echo -e "  ${RED}Refusing to replace non-file path: $install_path${NC}" >&2
+      exit 1
+    fi
+    echo -e "  ${YELLOW}Replacing existing file:${NC} $install_path"
+  fi
+
+  temporary_directory=$(mktemp -d "$HOME/.local/bin/.wt-install.XXXXXX")
+  ln -s "$WORKTREE_SCRIPT" "$temporary_directory/command"
+  mv -f "$temporary_directory/command" "$install_path"
+  rmdir "$temporary_directory"
+  echo -e "  ${GREEN}Symlinked:${NC} $install_path → $WORKTREE_SCRIPT"
+}
+
+install_command "$WORKTREE_INSTALL_PATH"
+install_command "$WT_INSTALL_PATH"
 
 # Step 2: Add shell function to rc file
 echo ""

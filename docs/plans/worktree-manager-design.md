@@ -113,14 +113,19 @@ CLAUDE.md already says "NEVER use git add -A" and "ALWAYS add files by explicit 
 ### Architecture
 
 ```
-~/.local/bin/worktree.sh          ← Standalone script (global symlink)
+~/.local/bin/wt                   ← Primary command (global symlink)
+~/.local/bin/worktree.sh          ← Compatibility command (global symlink)
     ▲                ▲
     |                |
 Shell function       Claude hook
 (wt, auto-cd)       (future, optional)
 ```
 
-The script lives at `scripts/worktree.sh` in the repo and is symlinked to `~/.local/bin/worktree.sh` by the installer. The `wt()` shell function finds it via PATH (`command -v worktree.sh`).
+The script lives at `scripts/worktree.sh` in the repo and is symlinked to both
+`~/.local/bin/wt` and `~/.local/bin/worktree.sh` by the installer. The real
+`wt` command makes the manager available to agents and non-interactive shells;
+the optional `wt()` shell function uses the compatibility name to add auto-cd
+behavior in interactive shells.
 
 ### Commands
 
@@ -224,7 +229,10 @@ wt() {
 }
 ```
 
-The script is installed globally at `~/.local/bin/worktree.sh` via symlink, and the shell function finds it via PATH (`command -v`). This means `wt` works from any git repo without per-repo installation.
+The script is installed globally at `~/.local/bin/wt` (with
+`~/.local/bin/worktree.sh` retained for compatibility). This means `wt` works
+from any git repo and from non-interactive agent sessions without per-repo
+installation or shell-function loading.
 
 ### Claude Hook Integration (Future, Optional)
 
@@ -263,7 +271,8 @@ Core script with three commands + help, plus these key implementation details:
 
 ### Step 2: Create installer (`scripts/install.sh`) — DONE
 
-- Symlinks `scripts/worktree.sh` to `~/.local/bin/worktree.sh`
+- Symlinks `scripts/worktree.sh` to `~/.local/bin/wt` and the compatibility
+  path `~/.local/bin/worktree.sh`
 - Adds `wt()` shell function to `~/.zshrc` or `~/.bashrc` with marker-based idempotent installation
 - Uses `$SHELL` env var to detect correct rc file (not just file existence)
 - Verifies both start AND end markers exist before awk rewrite (prevents rc file truncation if markers are corrupt)

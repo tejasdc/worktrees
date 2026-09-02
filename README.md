@@ -29,6 +29,12 @@ source ~/.zshrc  # or ~/.bashrc
 
 Requires bash 4+ (macOS: `brew install bash`).
 
+The installer creates a real `~/.local/bin/wt` command, so agents and
+non-interactive shells can use it without loading a shell rc file. Interactive
+shells also get a `wt` function that automatically changes into a newly created
+worktree. Install once per machine; `~/.local/bin` must be on that machine's
+PATH.
+
 ## What It Does
 
 ### Create (`wt <name>`)
@@ -121,11 +127,12 @@ Force-removes a worktree and its branch regardless of merge status. Use when you
 ## How It Works
 
 ```
-~/.local/bin/worktree.sh          <- Standalone script (all logic)
-    ^                ^
-    |                |
-Shell function       Claude hook
-(wt, auto-cd)       (future, optional)
+~/.local/bin/wt                   <- Real command for agents and scripts
+~/.local/bin/worktree.sh          <- Compatibility name (same manager)
+             ^
+             |
+Interactive shell function
+(wt, adds auto-cd behavior)
 ```
 
 - **Workspace-agnostic** — works with any git repo, no hardcoded paths
@@ -154,7 +161,7 @@ Shell function       Claude hook
 worktrees/
 ├── scripts/
 │   ├── worktree.sh      # Main script (globally installed via symlink)
-│   └── install.sh       # Installer (symlink + shell function)
+│   └── install.sh       # Installer (PATH commands + shell function)
 ├── templates/
 │   └── worktree-bootstrap.sh  # Scaffold copied by wt init
 └── docs/
