@@ -33,7 +33,10 @@ The installer creates a real `~/.local/bin/wt` command, so agents and
 non-interactive shells can use it without loading a shell rc file. Interactive
 shells also get a `wt` function that automatically changes into a newly created
 worktree. Install once per machine; `~/.local/bin` must be on that machine's
-PATH.
+PATH. The installed commands are symlinks into this clone, so never copy or
+rsync them between machines: a copied file freezes one version and rsync then
+replaces the symlink with it on every run. To update a machine, `git pull`
+here and rerun the installer.
 
 ## What It Does
 
