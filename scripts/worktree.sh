@@ -547,10 +547,22 @@ cmd_cleanup() {
         continue
       fi
 
+      # Refuse to remove any worktree that contains local data. Include ignored
+      # files because the force flag below would delete them too (for example,
+      # local config or generated files that are not reproducible).
+      local local_changes
+      local_changes=$(git -C "$wt_path" status --porcelain --untracked-files=all --ignored=matching 2>/dev/null || true)
+      if [ -n "$local_changes" ]; then
+        warn "  skip  $wt_name (worktree has local changes or untracked files)"
+        kept=$((kept + 1))
+        continue
+      fi
+
       # Check if branch is merged into main
       if is_branch_merged "$repo_root" "$branch" "$merge_target"; then
-        # Merged — safe to remove
-        if git -C "$repo_root" worktree remove --force "$wt_path" 2>/dev/null; then
+        # Remove without force as a second guard against changes arriving
+        # between the status check and removal.
+        if git -C "$repo_root" worktree remove "$wt_path" 2>/dev/null; then
           git -C "$repo_root" branch -d "$branch" >/dev/null 2>&1 || true
           success "  remove  $wt_name (branch $branch merged)"
           removed=$((removed + 1))

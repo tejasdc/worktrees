@@ -81,6 +81,26 @@ test_bootstrap_failure_is_terminal() {
   [ -d "$repository/.wt/broken" ] || fail "failed worktree was not preserved"
 }
 
+test_cleanup_preserves_dirty_merged_worktree() {
+  local repository
+  repository="$(create_repository dirty-cleanup)"
+
+  local worktree_path
+  worktree_path="$(cd "$repository" && "$MANAGER" dirty-task 2>/dev/null)"
+  printf 'local edit\n' >> "$worktree_path/README.md"
+  printf 'untracked work\n' > "$worktree_path/notes.txt"
+  printf 'ignored local data\n' > "$worktree_path/local.secret"
+  git -C "$worktree_path" check-ignore -q local.secret || {
+    printf '/local.secret\n' >> "$repository/.git/info/exclude"
+  }
+
+  (cd "$repository" && "$MANAGER" cleanup) || fail "cleanup failed"
+  [ -e "$worktree_path/.git" ] || fail "cleanup removed a dirty merged worktree"
+  grep -Fqx 'local edit' <(tail -n 1 "$worktree_path/README.md") || fail "tracked edits were lost"
+  grep -Fqx 'untracked work' "$worktree_path/notes.txt" || fail "untracked file was lost"
+  grep -Fqx 'ignored local data' "$worktree_path/local.secret" || fail "ignored file was lost"
+}
+
 test_installer_exposes_wt_without_shell_rc() {
   local test_home="$TEST_ROOT/installer-home"
   mkdir -p "$test_home/.local/bin"
@@ -102,6 +122,7 @@ test_installer_exposes_wt_without_shell_rc() {
 test_init_is_non_overwriting
 test_create_keeps_shared_checkout_clean
 test_bootstrap_failure_is_terminal
+test_cleanup_preserves_dirty_merged_worktree
 test_installer_exposes_wt_without_shell_rc
 
 printf 'PASS: worktree manager focused tests\n'
