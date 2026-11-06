@@ -127,6 +127,7 @@ Names are required; `wt cleanup` without a name refuses to run. `wt cleanup --he
 
 - has tracked edits (including Git's hidden assume-unchanged or skip-worktree flags), untracked files, or ignored files such as `.env`, local output, and build artifacts;
 - any process on the machine runs inside or holds a file open in (a compile, a browser, a release), not only your own shell;
+- the process-use scan cannot be trusted; a process that exits during the Linux scan is harmless, while permission or other scan errors still refuse removal;
 - is on a branch that never received a commit of its own. A freshly created branch sits on main's history and so looks "merged"; it is new work that has not committed yet. `wt delete <name>` removes one you are finished with.
 
 On 2026-11-06 one agent's `wt cleanup md-reader-check`, meant for its own worktree, removed another agent's three-minute-old worktree mid-compile.

@@ -24,6 +24,8 @@ and let each target repository own its setup in `scripts/worktree-bootstrap.sh`.
 - Help is read-only. Cleanup requires explicit names. Cleanup and delete refuse tracked,
   untracked, or ignored local files and running processes; inspect provenance before
   removing such files separately. See `README.md` under Cleanup and Delete.
+- Process-use scans tolerate only paths that vanish with an exited process; other scan
+  failures refuse removal. See `README.md` under Cleanup and Delete.
 
 ## Verification
 
