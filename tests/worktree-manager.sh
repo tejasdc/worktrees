@@ -204,6 +204,42 @@ test_in_use_guard_works_without_sbin_on_path() {
   [ ! -e "$worktree_path" ] || fail "delete kept a clean worktree after the process exited"
 }
 
+test_proc_scan_only_tolerates_exited_pids() {
+  [ -d /proc/self ] || return 0
+  local repository
+  repository="$(create_repository proc-scan-errors)"
+  local gone_path denied_path silent_path
+  gone_path="$(cd "$repository" && "$MANAGER" exited-pid 2>/dev/null)"
+  denied_path="$(cd "$repository" && "$MANAGER" denied-pid 2>/dev/null)"
+  silent_path="$(cd "$repository" && "$MANAGER" silent-failure 2>/dev/null)"
+  mark_worktree_merged "$repository" "$gone_path"
+  mark_worktree_merged "$repository" "$denied_path"
+  mark_worktree_merged "$repository" "$silent_path"
+
+  local fake_bin="$TEST_ROOT/fake-find"
+  mkdir -p "$fake_bin"
+  printf '%s\n' '#!/bin/bash' \
+    'printf "%s\n" /tmp/unrelated-process-path' \
+    'printf "%s\n" "find: /proc/999999/fd: No such file or directory" >&2' \
+    'exit 1' > "$fake_bin/find"
+  chmod +x "$fake_bin/find"
+  (cd "$repository" && PATH="$fake_bin:$PATH" "$MANAGER" cleanup exited-pid >/dev/null 2>&1) || fail "transient exited PID blocked cleanup"
+  [ ! -e "$gone_path" ] || fail "transient exited PID kept clean worktree"
+
+  printf '%s\n' '#!/bin/bash' \
+    'printf "%s\n" /tmp/unrelated-process-path' \
+    'printf "%s\n" "find: /proc/999999/fd: Permission denied" >&2' \
+    'exit 1' > "$fake_bin/find"
+  (cd "$repository" && PATH="$fake_bin:$PATH" "$MANAGER" cleanup denied-pid >/dev/null 2>&1) && fail "permission error was treated as a complete process scan"
+  [ -e "$denied_path/.git" ] || fail "permission error removed a worktree"
+
+  printf '%s\n' '#!/bin/bash' \
+    'printf "%s\n" /tmp/unrelated-process-path' \
+    'exit 1' > "$fake_bin/find"
+  (cd "$repository" && PATH="$fake_bin:$PATH" "$MANAGER" cleanup silent-failure >/dev/null 2>&1) && fail "silent scan failure was treated as complete"
+  [ -e "$silent_path/.git" ] || fail "silent scan failure removed a worktree"
+}
+
 test_hidden_tracked_edits_and_changed_branches_are_kept() {
   local repository
   repository="$(create_repository hidden-and-branch)"
@@ -270,6 +306,7 @@ test_cleanup_preserves_dirty_merged_worktree
 test_help_and_missing_scope_never_remove_worktrees
 test_cleanup_and_delete_preserve_ignored_files
 test_in_use_guard_works_without_sbin_on_path
+test_proc_scan_only_tolerates_exited_pids
 test_hidden_tracked_edits_and_changed_branches_are_kept
 test_delete_removes_clean_named_worktree
 test_installer_exposes_wt_without_shell_rc

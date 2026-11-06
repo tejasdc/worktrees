@@ -140,8 +140,29 @@ read_in_use_paths() {
   [ "$IN_USE_READ" = 1 ] && return
   IN_USE_READ=1
   if [ -d /proc/self ]; then
-    if IN_USE_PATHS=$(find /proc/[0-9]*/cwd /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null \
-      | sed 's/ (deleted)$//' | sort -u); then
+    local scan_errors raw_paths find_status scan_acceptable=0 diagnostic
+    scan_errors=$(mktemp) || return
+    if raw_paths=$(LC_ALL=C find /proc/[0-9]*/cwd /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>"$scan_errors"); then
+      find_status=0
+    else
+      find_status=$?
+    fi
+    if [ "$find_status" -eq 0 ]; then
+      scan_acceptable=1
+    elif [ "$find_status" -eq 1 ] && [ -r /proc/self/cwd ] && [ -s "$scan_errors" ]; then
+      # A PID may exit after the shell expands /proc paths but before find opens them.
+      # Other errors leave process visibility uncertain and must refuse removal.
+      scan_acceptable=1
+      while IFS= read -r diagnostic; do
+        if ! [[ "$diagnostic" =~ ^find:\ .*/proc/[0-9]+/(cwd|fd)(/[0-9]+)?[^/]*:\ No\ such\ file\ or\ directory$ ]]; then
+          scan_acceptable=0
+          break
+        fi
+      done < "$scan_errors"
+    fi
+    rm -f "$scan_errors"
+    if [ "$scan_acceptable" = 1 ] && [ -n "$raw_paths" ] &&
+      IN_USE_PATHS=$(printf '%s\n' "$raw_paths" | sed 's/ (deleted)$//' | sort -u); then
       IN_USE_CHECK_AVAILABLE=1
     fi
   else
