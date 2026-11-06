@@ -2,12 +2,21 @@
 
 set -euo pipefail
 
+BASH_BIN_DIR="$(dirname "$BASH")"
+PATH="$BASH_BIN_DIR:$PATH"
+export PATH
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MANAGER="$PROJECT_ROOT/scripts/worktree.sh"
+MANAGER="${WT_MANAGER:-$PROJECT_ROOT/scripts/worktree.sh}"
 INSTALLER="$PROJECT_ROOT/scripts/install.sh"
 TEST_ROOT="$(mktemp -d)"
+ACTIVE_PROCESS_PID=""
 
 cleanup() {
+  if [ -n "$ACTIVE_PROCESS_PID" ]; then
+    kill "$ACTIVE_PROCESS_PID" 2>/dev/null || true
+    wait "$ACTIVE_PROCESS_PID" 2>/dev/null || true
+  fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -150,6 +159,51 @@ test_cleanup_and_delete_preserve_ignored_files() {
   grep -Fqx 'keep me too' "$delete_path/local-output/unsaved.txt" || fail "delete lost ignored content"
 }
 
+test_in_use_guard_works_without_sbin_on_path() {
+  local repository
+  repository="$(create_repository in-use-guard)"
+  local worktree_path
+  worktree_path="$(cd "$repository" && "$MANAGER" active-task 2>/dev/null)"
+  mark_worktree_merged "$repository" "$worktree_path"
+  local bash_bin_dir
+  bash_bin_dir="$(dirname "$BASH")"
+  local minimal_path="$bash_bin_dir:/usr/bin:/bin"
+
+  if [ ! -d /proc/self ]; then
+    PATH="$minimal_path" command -v lsof >/dev/null 2>&1 && fail "test PATH unexpectedly finds lsof"
+    [ -x /usr/sbin/lsof ] || fail "macOS lsof is not installed at /usr/sbin/lsof"
+  fi
+
+  local ready_file="$TEST_ROOT/active-task.ready"
+  (cd "$worktree_path" && : > "$ready_file" && exec sleep 60) >/dev/null 2>&1 &
+  ACTIVE_PROCESS_PID=$!
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    [ -e "$ready_file" ] && break
+    sleep 0.05
+  done
+  [ -e "$ready_file" ] || fail "process did not enter the active worktree"
+
+  local cleanup_output="$TEST_ROOT/in-use-cleanup.output"
+  if (cd "$repository" && PATH="$minimal_path" "$MANAGER" cleanup active-task >"$cleanup_output" 2>&1); then
+    fail "cleanup accepted a worktree used by a running process"
+  fi
+  grep -Fq "a running process is using it" "$cleanup_output" || fail "cleanup did not report the active process"
+  [ -e "$worktree_path/.git" ] || fail "cleanup removed a worktree used by a running process"
+
+  local delete_output="$TEST_ROOT/in-use-delete.output"
+  if (cd "$repository" && PATH="$minimal_path" "$MANAGER" delete active-task >"$delete_output" 2>&1); then
+    fail "delete accepted a worktree used by a running process"
+  fi
+  grep -Fq "a running process is using worktree" "$delete_output" || fail "delete did not report the active process"
+  [ -e "$worktree_path/.git" ] || fail "delete removed a worktree used by a running process"
+
+  kill "$ACTIVE_PROCESS_PID" 2>/dev/null || true
+  wait "$ACTIVE_PROCESS_PID" 2>/dev/null || true
+  ACTIVE_PROCESS_PID=""
+  (cd "$repository" && PATH="$minimal_path" "$MANAGER" delete active-task >/dev/null 2>&1) || fail "delete did not succeed after the process exited"
+  [ ! -e "$worktree_path" ] || fail "delete kept a clean worktree after the process exited"
+}
+
 test_hidden_tracked_edits_and_changed_branches_are_kept() {
   local repository
   repository="$(create_repository hidden-and-branch)"
@@ -190,6 +244,9 @@ test_delete_removes_clean_named_worktree() {
 
 test_installer_exposes_wt_without_shell_rc() {
   local test_home="$TEST_ROOT/installer-home"
+  local bash_bin_dir
+  bash_bin_dir="$(dirname "$BASH")"
+  local test_path="$test_home/.local/bin:$bash_bin_dir:/usr/bin:/bin"
   mkdir -p "$test_home/.local/bin"
   touch "$test_home/.zshrc"
 
@@ -198,11 +255,11 @@ test_installer_exposes_wt_without_shell_rc() {
 
   [ -L "$test_home/.local/bin/wt" ] || fail "installer did not create the wt command"
   [ -L "$test_home/.local/bin/worktree.sh" ] || fail "installer removed the compatibility command"
-  [ "$(PATH="$test_home/.local/bin:/usr/bin:/bin" command -v wt)" = "$test_home/.local/bin/wt" ] || \
+  [ "$(PATH="$test_path" command -v wt)" = "$test_home/.local/bin/wt" ] || \
     fail "wt is not discoverable on PATH without sourcing a shell rc"
-  PATH="$test_home/.local/bin:/usr/bin:/bin" wt --help >/dev/null 2>&1 || \
+  PATH="$test_path" wt --help >/dev/null 2>&1 || \
     fail "the installed wt command is not executable"
-  PATH="$test_home/.local/bin:/usr/bin:/bin" worktree.sh --help >/dev/null 2>&1 || \
+  PATH="$test_path" worktree.sh --help >/dev/null 2>&1 || \
     fail "the compatibility worktree.sh command is not executable"
 }
 
@@ -212,6 +269,7 @@ test_bootstrap_failure_is_terminal
 test_cleanup_preserves_dirty_merged_worktree
 test_help_and_missing_scope_never_remove_worktrees
 test_cleanup_and_delete_preserve_ignored_files
+test_in_use_guard_works_without_sbin_on_path
 test_hidden_tracked_edits_and_changed_branches_are_kept
 test_delete_removes_clean_named_worktree
 test_installer_exposes_wt_without_shell_rc

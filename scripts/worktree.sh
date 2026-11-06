@@ -135,14 +135,25 @@ is_cwd_inside() {
 # Elsewhere (macOS) lsof answers the same question.
 IN_USE_PATHS=""
 IN_USE_READ=0
+IN_USE_CHECK_AVAILABLE=0
 read_in_use_paths() {
   [ "$IN_USE_READ" = 1 ] && return
   IN_USE_READ=1
   if [ -d /proc/self ]; then
-    IN_USE_PATHS=$(find /proc/[0-9]*/cwd /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null \
-      | sed 's/ (deleted)$//' | sort -u)
-  elif command -v lsof >/dev/null 2>&1; then
-    IN_USE_PATHS=$(lsof -Fn 2>/dev/null | sed -n 's/^n//p' | sort -u)
+    if IN_USE_PATHS=$(find /proc/[0-9]*/cwd /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null \
+      | sed 's/ (deleted)$//' | sort -u); then
+      IN_USE_CHECK_AVAILABLE=1
+    fi
+  else
+    local lsof_path
+    if [ -x /usr/sbin/lsof ]; then
+      lsof_path=/usr/sbin/lsof
+    else
+      lsof_path=$(command -v lsof 2>/dev/null || true)
+    fi
+    if [ -n "$lsof_path" ] && IN_USE_PATHS=$("$lsof_path" -Fn 2>/dev/null | sed -n 's/^n//p' | sort -u); then
+      IN_USE_CHECK_AVAILABLE=1
+    fi
   fi
 }
 
@@ -152,7 +163,8 @@ worktree_in_use() {
   local wt_real
   wt_real=$(cd "$1" && pwd -P) || return 1
   read_in_use_paths
-  printf '%s\n' "$IN_USE_PATHS" | awk -v p="$wt_real" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }'
+  [ "$IN_USE_CHECK_AVAILABLE" = 1 ] || return 2
+  printf '%s\n' "$IN_USE_PATHS" | awk -v p="$wt_real" '$0 == p || index($0, p "/") == 1 { found = 1 } END { exit !found }'
 }
 
 # A branch that never received a commit of its own sits on main's history and so reads as
@@ -581,7 +593,7 @@ cmd_cleanup() {
   local removed=0
   local kept=0
 
-  local wt_path wt_name branch
+  local wt_path wt_name branch in_use_status
   for wt_name in "$@"; do
       if ! wt_path=$(find_worktree_path "$repo_root" "$wt_name"); then
         warn "  skip  $wt_name (worktree not found)"
@@ -614,6 +626,13 @@ cmd_cleanup() {
         warn "  skip  $wt_name (a running process is using it)"
         kept=$((kept + 1))
         continue
+      else
+        in_use_status=$?
+        if [ "$in_use_status" -eq 2 ]; then
+          warn "  skip  $wt_name (could not verify whether a running process is using it)"
+          kept=$((kept + 1))
+          continue
+        fi
       fi
 
       if branch_never_committed "$repo_root" "$branch"; then
@@ -660,6 +679,7 @@ cmd_cleanup() {
 
 cmd_delete() {
   local name="${1:-}"
+  local in_use_status
 
   if [ -z "$name" ]; then
     error "Error: worktree name required"
@@ -709,6 +729,12 @@ cmd_delete() {
   if worktree_in_use "$wt_path"; then
     error "Error: a running process is using worktree '$name'"
     return 1
+  else
+    in_use_status=$?
+    if [ "$in_use_status" -eq 2 ]; then
+      error "Error: cannot verify whether a running process is using worktree '$name'; refusing deletion"
+      return 1
+    fi
   fi
 
   log ""

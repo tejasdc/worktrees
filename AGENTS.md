@@ -7,9 +7,9 @@ and let each target repository own its setup in `scripts/worktree-bootstrap.sh`.
 
 - `wt <name>` creates an isolated worktree from the remote default branch and prints only
   its path on stdout; user-facing output stays on stderr so the shell wrapper can `cd`.
-- `scripts/install.sh` installs a real `~/.local/bin/wt` executable for agents and
-  non-interactive sessions. The shell function is optional convenience, never the only
-  way the `wt` command exists.
+- `scripts/install.sh` symlinks `~/.local/bin/wt` and the compatibility
+  `~/.local/bin/worktree.sh` command to this checkout for agents and non-interactive
+  sessions. The shell function is optional convenience, never the only way `wt` exists.
 - `wt init` only installs the canonical scaffold. It never overwrites an existing project
   bootstrap, and the generated script becomes part of the target repository.
 - Dependency commands, generated files, special local config, and service-specific ports
