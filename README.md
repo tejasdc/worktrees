@@ -123,6 +123,14 @@ Legacy worktrees (in `.worktrees/`) show a `(legacy)` marker. They work normally
 
 Removes only worktrees whose branches are merged into `origin/main`. Unmerged worktrees are always kept. Scans both `.wt/` and legacy `.worktrees/`.
 
+`wt cleanup <name>…` limits it to the named worktrees; with no names it considers every worktree in the repository, including other agents'. It always keeps a worktree that:
+
+- has uncommitted or untracked files;
+- any process on the machine runs inside or holds a file open in (a compile, a browser, a release), not only your own shell;
+- is on a branch that never received a commit of its own. A freshly created branch sits on main's history and so looks "merged"; it is new work that has not committed yet. `wt delete <name>` removes one you are finished with.
+
+On 2026-11-06 one agent's `wt cleanup md-reader-check`, meant for its own worktree, removed another agent's three-minute-old worktree mid-compile.
+
 ### Delete (`wt delete <name>`)
 
 Force-removes a worktree and its branch regardless of merge status. Use when you want to discard a worktree you no longer need. Refuses if you're currently inside the worktree. Also aliased as `wt rm <name>`.

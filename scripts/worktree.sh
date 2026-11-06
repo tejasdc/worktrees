@@ -128,6 +128,42 @@ is_cwd_inside() {
   [[ "$pwd_real" == "$wt_real" || "$pwd_real" == "$wt_real"/* ]]
 }
 
+# Paths every other process on this machine runs in or holds open, read once per cleanup.
+# Checking only the caller's own directory let one agent's cleanup delete a worktree another
+# agent's compile and browser were running in (thinkering, 2026-11-06: uv_cwd crash).
+# One find over /proc: a readlink per open file took minutes with ~650 processes.
+# Elsewhere (macOS) lsof answers the same question.
+IN_USE_PATHS=""
+IN_USE_READ=0
+read_in_use_paths() {
+  [ "$IN_USE_READ" = 1 ] && return
+  IN_USE_READ=1
+  if [ -d /proc/self ]; then
+    IN_USE_PATHS=$(find /proc/[0-9]*/cwd /proc/[0-9]*/fd -maxdepth 1 -type l -printf '%l\n' 2>/dev/null \
+      | sed 's/ (deleted)$//' | sort -u)
+  elif command -v lsof >/dev/null 2>&1; then
+    IN_USE_PATHS=$(lsof -Fn 2>/dev/null | sed -n 's/^n//p' | sort -u)
+  fi
+}
+
+# Whether any process runs inside the worktree or holds a file in it open. The calling
+# shell's own directory is handled separately by is_cwd_inside.
+worktree_in_use() {
+  local wt_real
+  wt_real=$(cd "$1" && pwd -P) || return 1
+  read_in_use_paths
+  printf '%s\n' "$IN_USE_PATHS" | awk -v p="$wt_real" '$0 == p || index($0, p "/") == 1 { found = 1; exit } END { exit !found }'
+}
+
+# A branch that never received a commit of its own sits on main's history and so reads as
+# "merged", although it is new work that has not started committing yet. Its reflog holds
+# only the creation entry until its first commit, merge or reset.
+branch_never_committed() {
+  local repo_root="$1" branch="$2" entries
+  entries=$(git -C "$repo_root" reflog show --format=%H "refs/heads/$branch" -- 2>/dev/null | wc -l)
+  [ "$entries" -le 1 ]
+}
+
 # ─── File Discovery ──────────────────────────────────────────────────────────
 #
 # Copies gitignored .env* files from the main repo to the new worktree.
@@ -500,6 +536,9 @@ cmd_list() {
 # ─── Cleanup Command ─────────────────────────────────────────────────────────
 
 cmd_cleanup() {
+  # Names limit cleanup to those worktrees. Without this, `wt cleanup md-reader-check` cleaned
+  # every merged worktree in the repository, including other agents' (2026-11-06).
+  local -a only_names=("$@")
   local repo_root
   repo_root=$(get_repo_root)
   if [ -z "$repo_root" ]; then
@@ -537,6 +576,9 @@ cmd_cleanup() {
 
       local wt_name
       wt_name=$(basename "$wt_path")
+      if [ ${#only_names[@]} -gt 0 ] && [[ " ${only_names[*]} " != *" $wt_name "* ]]; then
+        continue
+      fi
       local branch
       branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
@@ -552,6 +594,18 @@ cmd_cleanup() {
       local_changes=$(git -C "$wt_path" status --porcelain --untracked-files=all 2>/dev/null || true)
       if [ -n "$local_changes" ]; then
         warn "  skip  $wt_name (worktree has local changes or untracked files)"
+        kept=$((kept + 1))
+        continue
+      fi
+
+      if worktree_in_use "$wt_path"; then
+        warn "  skip  $wt_name (a running process is using it)"
+        kept=$((kept + 1))
+        continue
+      fi
+
+      if branch_never_committed "$repo_root" "$branch"; then
+        log "  ${DIM}keep${NC}    $wt_name (branch $branch has no commits yet; wt delete removes it)"
         kept=$((kept + 1))
         continue
       fi
@@ -679,7 +733,7 @@ Usage:
   wt <name>              Create a new worktree and cd into it
   wt init                Add a project-owned bootstrap scaffold
   wt list                List all worktrees with branch and merge status
-  wt cleanup             Remove worktrees whose branches are merged into main
+  wt cleanup [name…]     Remove merged worktrees (only the named ones, if given)
   wt delete <name>       Force-remove a worktree (even if unmerged)
   wt help                Show this help
 
@@ -733,7 +787,8 @@ main() {
       cmd_list
       ;;
     cleanup|clean)
-      cmd_cleanup
+      shift
+      cmd_cleanup "$@"
       ;;
     delete|rm)
       cmd_delete "${2:-}"
