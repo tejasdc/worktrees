@@ -6,8 +6,8 @@ Single-command worktree creation with automatic `.env` copying and project boots
 wt my-feature            # Create worktree, copy .env, run bootstrap, cd into it
 wt init                  # Scaffold this repo's one-time bootstrap hook
 wt list                  # Show all worktrees with merge status
-wt cleanup               # Remove worktrees whose branches are merged
-wt delete old-feature    # Force-remove a worktree (even if unmerged)
+wt cleanup old-feature   # Remove this merged worktree if clean
+wt delete old-feature    # Remove this worktree if clean, even if unmerged
 ```
 
 ## Why
@@ -119,13 +119,13 @@ Shows all worktrees with status:
 
 Legacy worktrees (in `.worktrees/`) show a `(legacy)` marker. They work normally — they're just in the old directory.
 
-### Cleanup (`wt cleanup`)
+### Cleanup (`wt cleanup <name> [name…]`)
 
 Removes only worktrees whose branches are merged into `origin/main`. Unmerged worktrees are always kept. Scans both `.wt/` and legacy `.worktrees/`.
 
-`wt cleanup <name>…` limits it to the named worktrees; with no names it considers every worktree in the repository, including other agents'. It always keeps a worktree that:
+Names are required; `wt cleanup` without a name refuses to run. `wt cleanup --help` only shows help. If any named worktree is kept or missing, cleanup returns a failure status. Cleanup keeps a named worktree that:
 
-- has uncommitted or untracked files;
+- has tracked edits (including Git's hidden assume-unchanged or skip-worktree flags), untracked files, or ignored files such as `.env`, local output, and build artifacts;
 - any process on the machine runs inside or holds a file open in (a compile, a browser, a release), not only your own shell;
 - is on a branch that never received a commit of its own. A freshly created branch sits on main's history and so looks "merged"; it is new work that has not committed yet. `wt delete <name>` removes one you are finished with.
 
@@ -133,7 +133,7 @@ On 2026-11-06 one agent's `wt cleanup md-reader-check`, meant for its own worktr
 
 ### Delete (`wt delete <name>`)
 
-Force-removes a worktree and its branch regardless of merge status. Use when you want to discard a worktree you no longer need. Refuses if you're currently inside the worktree. Also aliased as `wt rm <name>`.
+Removes one clean worktree and its branch regardless of merge status. It refuses local files, running processes, the worktree you are currently inside, and any worktree whose branch no longer matches the name the manager created. If files are present, inspect their provenance and remove them separately before retrying. `wt delete <name> --help` only shows help. Also aliased as `wt rm <name>`.
 
 ## How It Works
 
@@ -160,7 +160,7 @@ Interactive shell function
 | Branch from `origin/main` (not HEAD) | Prevents cascading dependencies between worktrees |
 | `worktree-` branch prefix | Prevents collisions with real branches |
 | Merge-gated cleanup only | Auto-merging is dangerous; only clean up what's merged |
-| `delete` for force removal | Explicit command for intentional discards, separate from safe `cleanup` |
+| `delete` for unmerged clean worktrees | Explicit command for a named worktree; local files still require separate provenance review |
 | No `create` subcommand | `wt my-feature` is cleaner than `wt create my-feature` |
 | Only copy `.env*` (not keys/certs) | `.env` is universal; project-specific files belong in the bootstrap script |
 | Bootstrap hook via convention (`scripts/worktree-bootstrap.sh`) | Project owns its setup; `wt` stays agnostic |

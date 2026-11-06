@@ -36,6 +36,17 @@ create_repository() {
   printf '%s\n' "$repository"
 }
 
+mark_worktree_merged() {
+  local repository="$1" worktree_path="$2"
+  local branch
+  branch="$(git -C "$worktree_path" branch --show-current)"
+  printf '%s\n' "$branch" > "$worktree_path/$branch.txt"
+  git -C "$worktree_path" add "$branch.txt"
+  git -C "$worktree_path" commit -m "complete $branch" --quiet
+  git -C "$repository" merge --no-ff --quiet -m "merge $branch" "$branch"
+  git -C "$repository" push origin main --quiet
+}
+
 test_init_is_non_overwriting() {
   local repository
   repository="$(create_repository init)"
@@ -89,14 +100,92 @@ test_cleanup_preserves_dirty_merged_worktree() {
   worktree_path="$(cd "$repository" && "$MANAGER" dirty-task 2>/dev/null)"
   local clean_worktree_path
   clean_worktree_path="$(cd "$repository" && "$MANAGER" clean-task 2>/dev/null)"
+  mark_worktree_merged "$repository" "$worktree_path"
+  mark_worktree_merged "$repository" "$clean_worktree_path"
   printf 'local edit\n' >> "$worktree_path/README.md"
   printf 'untracked work\n' > "$worktree_path/notes.txt"
 
-  (cd "$repository" && "$MANAGER" cleanup) || fail "cleanup failed"
+  (cd "$repository" && "$MANAGER" cleanup dirty-task clean-task) && fail "cleanup claimed all named worktrees were removed"
   [ -e "$worktree_path/.git" ] || fail "cleanup removed a dirty merged worktree"
   [ ! -e "$clean_worktree_path" ] || fail "cleanup kept a clean merged worktree"
   grep -Fqx 'local edit' <(tail -n 1 "$worktree_path/README.md") || fail "tracked edits were lost"
   grep -Fqx 'untracked work' "$worktree_path/notes.txt" || fail "untracked file was lost"
+}
+
+test_help_and_missing_scope_never_remove_worktrees() {
+  local repository
+  repository="$(create_repository help-safety)"
+  local worktree_path
+  worktree_path="$(cd "$repository" && "$MANAGER" eligible 2>/dev/null)"
+  mark_worktree_merged "$repository" "$worktree_path"
+
+  (cd "$repository" && "$MANAGER" cleanup --help >/dev/null 2>&1) || fail "cleanup help failed"
+  (cd "$repository" && "$MANAGER" cleanup help >/dev/null 2>&1) || fail "cleanup word help failed"
+  (cd "$repository" && "$MANAGER" cleanup eligible --help >/dev/null 2>&1) || fail "cleanup target help failed"
+  (cd "$repository" && "$MANAGER" delete eligible --help >/dev/null 2>&1) || fail "delete target help failed"
+  (cd "$repository" && "$MANAGER" cleanup >/dev/null 2>&1) && fail "cleanup without a target succeeded"
+  [ -e "$worktree_path/.git" ] || fail "help or unscoped cleanup removed a worktree"
+
+  (cd "$repository" && "$MANAGER" cleanup eligible >/dev/null 2>&1) || fail "explicit cleanup failed"
+  [ ! -e "$worktree_path" ] || fail "explicit cleanup kept an eligible worktree"
+}
+
+test_cleanup_and_delete_preserve_ignored_files() {
+  local repository
+  repository="$(create_repository ignored-safety)"
+  printf '/local-output/\n' >> "$repository/.git/info/exclude"
+  local cleanup_path delete_path
+  cleanup_path="$(cd "$repository" && "$MANAGER" cleanup-ignored 2>/dev/null)"
+  delete_path="$(cd "$repository" && "$MANAGER" delete-ignored 2>/dev/null)"
+  mark_worktree_merged "$repository" "$cleanup_path"
+  mkdir -p "$cleanup_path/local-output" "$delete_path/local-output"
+  printf 'keep me\n' > "$cleanup_path/local-output/unsaved.txt"
+  printf 'keep me too\n' > "$delete_path/local-output/unsaved.txt"
+
+  (cd "$repository" && "$MANAGER" cleanup cleanup-ignored >/dev/null 2>&1) && fail "cleanup claimed ignored work was removed"
+  (cd "$repository" && "$MANAGER" delete delete-ignored >/dev/null 2>&1) && fail "delete accepted ignored work"
+  [ -e "$cleanup_path/.git" ] || fail "cleanup removed ignored work"
+  [ -e "$delete_path/.git" ] || fail "delete removed ignored work"
+  grep -Fqx 'keep me' "$cleanup_path/local-output/unsaved.txt" || fail "cleanup lost ignored content"
+  grep -Fqx 'keep me too' "$delete_path/local-output/unsaved.txt" || fail "delete lost ignored content"
+}
+
+test_hidden_tracked_edits_and_changed_branches_are_kept() {
+  local repository
+  repository="$(create_repository hidden-and-branch)"
+  local hidden_path skipped_path changed_path
+  hidden_path="$(cd "$repository" && "$MANAGER" hidden-edits 2>/dev/null)"
+  skipped_path="$(cd "$repository" && "$MANAGER" skipped-edits 2>/dev/null)"
+  changed_path="$(cd "$repository" && "$MANAGER" changed-branch 2>/dev/null)"
+  mark_worktree_merged "$repository" "$hidden_path"
+  mark_worktree_merged "$repository" "$skipped_path"
+  git -C "$hidden_path" update-index --assume-unchanged README.md
+  printf 'hidden edit\n' >> "$hidden_path/README.md"
+  git -C "$skipped_path" update-index --skip-worktree README.md
+  printf 'skipped edit\n' >> "$skipped_path/README.md"
+  git -C "$changed_path" switch -c feature/important --quiet
+  printf 'important commit\n' > "$changed_path/important.txt"
+  git -C "$changed_path" add important.txt
+  git -C "$changed_path" commit -m important --quiet
+
+  (cd "$repository" && "$MANAGER" cleanup hidden-edits >/dev/null 2>&1) && fail "cleanup accepted a hidden tracked edit"
+  (cd "$repository" && "$MANAGER" cleanup skipped-edits >/dev/null 2>&1) && fail "cleanup accepted a skip-worktree edit"
+  (cd "$repository" && "$MANAGER" delete hidden-edits >/dev/null 2>&1) && fail "delete accepted a hidden tracked edit"
+  (cd "$repository" && "$MANAGER" delete changed-branch >/dev/null 2>&1) && fail "delete accepted a switched branch"
+  [ -e "$hidden_path/.git" ] || fail "hidden tracked edit was removed"
+  [ -e "$skipped_path/.git" ] || fail "skip-worktree edit was removed"
+  [ -e "$changed_path/.git" ] || fail "switched branch worktree was removed"
+  git -C "$repository" show-ref --verify --quiet refs/heads/feature/important || fail "switched branch tip was lost"
+}
+
+test_delete_removes_clean_named_worktree() {
+  local repository
+  repository="$(create_repository clean-delete)"
+  local worktree_path
+  worktree_path="$(cd "$repository" && "$MANAGER" done-task 2>/dev/null)"
+  (cd "$repository" && "$MANAGER" delete done-task >/dev/null 2>&1) || fail "clean named delete failed"
+  [ ! -e "$worktree_path" ] || fail "clean named delete kept the worktree"
+  ! git -C "$repository" show-ref --verify --quiet refs/heads/worktree-done-task || fail "clean named delete kept the branch"
 }
 
 test_installer_exposes_wt_without_shell_rc() {
@@ -121,6 +210,10 @@ test_init_is_non_overwriting
 test_create_keeps_shared_checkout_clean
 test_bootstrap_failure_is_terminal
 test_cleanup_preserves_dirty_merged_worktree
+test_help_and_missing_scope_never_remove_worktrees
+test_cleanup_and_delete_preserve_ignored_files
+test_hidden_tracked_edits_and_changed_branches_are_kept
+test_delete_removes_clean_named_worktree
 test_installer_exposes_wt_without_shell_rc
 
 printf 'PASS: worktree manager focused tests\n'

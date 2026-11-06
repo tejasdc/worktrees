@@ -21,9 +21,13 @@ and let each target repository own its setup in `scripts/worktree-bootstrap.sh`.
   Git directory's local exclude; tracked ignore changes belong only to explicit project setup.
 - A failed project bootstrap is a failed create. Preserve the worktree for diagnosis, return
   the bootstrap status, and never print the normal readiness message.
+- Help is read-only. Cleanup requires explicit names. Cleanup and delete refuse tracked,
+  untracked, or ignored local files and running processes; inspect provenance before
+  removing such files separately. See `README.md` under Cleanup and Delete.
 
 ## Verification
 
 Run `bash -n scripts/worktree.sh scripts/install.sh templates/worktree-bootstrap.sh`, then
 `bash tests/worktree-manager.sh`. The focused test covers non-overwriting init, clean
-worktree creation, terminal bootstrap failure, and non-interactive PATH discovery of `wt`.
+worktree creation, terminal bootstrap failure, cleanup and deletion safety, and
+non-interactive PATH discovery of `wt`.

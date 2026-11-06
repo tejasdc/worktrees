@@ -6,8 +6,8 @@
 #   worktree.sh <name>              Create a new worktree
 #   worktree.sh init                Add a project bootstrap scaffold
 #   worktree.sh list                List all worktrees with status
-#   worktree.sh cleanup             Remove worktrees whose branches are merged
-#   worktree.sh delete <name>       Force-remove a worktree (even if unmerged)
+#   worktree.sh cleanup <name>      Remove a named merged worktree if clean
+#   worktree.sh delete <name>       Remove a named clean worktree (even if unmerged)
 #
 # Designed to be workspace-agnostic. Works with any git repo.
 # All user-facing output goes to stderr. Only the worktree path goes to stdout
@@ -162,6 +162,18 @@ branch_never_committed() {
   local repo_root="$1" branch="$2" entries
   entries=$(git -C "$repo_root" reflog show --format=%H "refs/heads/$branch" -- 2>/dev/null | wc -l)
   [ "$entries" -le 1 ]
+}
+
+# Git's ordinary status omits ignored files, including copied .env files and build output.
+# Treat any tracked, untracked, or ignored file as local work until its provenance is
+# inspected and it is removed separately. A failed status check must also refuse removal.
+worktree_has_local_files() {
+  local status tracked_flags
+  status=$(git -C "$1" status --porcelain=v1 --untracked-files=all --ignored=matching) || return 0
+  [ -n "$status" ] && return 0
+  # assume-unchanged and skip-worktree can hide edited tracked files from status.
+  tracked_flags=$(git -C "$1" ls-files -v) || return 0
+  [[ "$tracked_flags" =~ (^|$'\n')[a-zS]\  ]]
 }
 
 # ─── File Discovery ──────────────────────────────────────────────────────────
@@ -407,7 +419,7 @@ cmd_create() {
   log "  ${DIM}Path:${NC}     $worktree_path"
   log ""
   log "  ${DIM}To push:${NC}  git push -u origin $branch_name"
-  log "  ${DIM}To clean:${NC} wt cleanup"
+  log "  ${DIM}To clean:${NC} wt cleanup $name"
   log ""
 
   # Print path to stdout (for shell function cd / Claude hook)
@@ -527,7 +539,7 @@ cmd_list() {
     log "${DIM}────────────────────────────────────────${NC}"
     log "  Total: $count worktree(s)"
     if [ $merged_count -gt 0 ]; then
-      log "  ${GREEN}$merged_count merged${NC} — run ${BLUE}wt cleanup${NC} to remove"
+      log "  ${GREEN}$merged_count merged${NC} — run ${BLUE}wt cleanup <name>${NC} for each one you own"
     fi
   fi
   log ""
@@ -536,23 +548,23 @@ cmd_list() {
 # ─── Cleanup Command ─────────────────────────────────────────────────────────
 
 cmd_cleanup() {
-  # Names limit cleanup to those worktrees. Without this, `wt cleanup md-reader-check` cleaned
-  # every merged worktree in the repository, including other agents' (2026-11-06).
-  local -a only_names=("$@")
+  if [ "$#" -eq 0 ]; then
+    error "Error: name at least one worktree to clean up"
+    error "Usage: wt cleanup <name> [name…]"
+    return 2
+  fi
+  local name
+  for name in "$@"; do
+    if [[ "$name" == -* || "$name" == */* || "$name" == . || "$name" == .. || -z "$name" ]]; then
+      error "Error: invalid worktree name: $name"
+      return 2
+    fi
+  done
   local repo_root
   repo_root=$(get_repo_root)
   if [ -z "$repo_root" ]; then
     error "Error: not inside a git repository"
     exit 1
-  fi
-
-  # Collect all worktree directories (current + legacy)
-  local -a wt_dirs
-  mapfile -t wt_dirs < <(get_all_worktree_dirs "$repo_root")
-
-  if [ ${#wt_dirs[@]} -eq 0 ]; then
-    info "No worktrees to clean up"
-    return
   fi
 
   log ""
@@ -569,18 +581,20 @@ cmd_cleanup() {
   local removed=0
   local kept=0
 
-  for worktree_dir in "${wt_dirs[@]}"; do
-    for wt_path in "$worktree_dir"/*/; do
-      [ ! -d "$wt_path" ] && continue
-      [ ! -e "$wt_path/.git" ] && continue
-
-      local wt_name
-      wt_name=$(basename "$wt_path")
-      if [ ${#only_names[@]} -gt 0 ] && [[ " ${only_names[*]} " != *" $wt_name "* ]]; then
+  local wt_path wt_name branch
+  for wt_name in "$@"; do
+      if ! wt_path=$(find_worktree_path "$repo_root" "$wt_name"); then
+        warn "  skip  $wt_name (worktree not found)"
+        kept=$((kept + 1))
         continue
       fi
-      local branch
       branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+      if [ "$branch" != "worktree-$wt_name" ]; then
+        warn "  skip  $wt_name (branch $branch is not this manager's branch for that name)"
+        kept=$((kept + 1))
+        continue
+      fi
 
       # Skip if we're currently inside this worktree (or a subdirectory of it)
       if is_cwd_inside "$wt_path" 2>/dev/null; then
@@ -589,11 +603,9 @@ cmd_cleanup() {
         continue
       fi
 
-      # Refuse to remove any worktree with tracked edits or untracked files.
-      local local_changes
-      local_changes=$(git -C "$wt_path" status --porcelain --untracked-files=all 2>/dev/null || true)
-      if [ -n "$local_changes" ]; then
-        warn "  skip  $wt_name (worktree has local changes or untracked files)"
+      # Refuse to remove any worktree with local files, including ignored files.
+      if worktree_has_local_files "$wt_path"; then
+        warn "  skip  $wt_name (worktree has tracked, untracked, or ignored files, or status failed)"
         kept=$((kept + 1))
         continue
       fi
@@ -626,7 +638,6 @@ cmd_cleanup() {
         log "  ${DIM}keep${NC}    $wt_name (branch $branch not merged)"
         kept=$((kept + 1))
       fi
-    done
   done
 
   log ""
@@ -641,14 +652,8 @@ cmd_cleanup() {
     info "No worktrees to clean up"
   fi
 
-  # Clean up empty worktree directories
-  for worktree_dir in "$repo_root/.wt" "$repo_root/.worktrees"; do
-    if [ -d "$worktree_dir" ] && [ -z "$(ls -A "$worktree_dir" 2>/dev/null)" ]; then
-      rmdir "$worktree_dir" 2>/dev/null || true
-    fi
-  done
-
   log ""
+  [ "$kept" -eq 0 ]
 }
 
 # ─── Delete Command ──────────────────────────────────────────────────────────
@@ -660,6 +665,10 @@ cmd_delete() {
     error "Error: worktree name required"
     error "Usage: wt delete <name>"
     exit 1
+  fi
+  if [ "$#" -ne 1 ] || [[ "$name" == -* || "$name" == */* || "$name" == . || "$name" == .. ]]; then
+    error "Error: usage is wt delete <name>"
+    return 2
   fi
 
   local repo_root
@@ -679,12 +688,27 @@ cmd_delete() {
 
   local branch
   branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  if [ "$branch" != "worktree-$name" ]; then
+    error "Error: branch '$branch' is not this manager's branch for '$name'"
+    return 1
+  fi
 
   # Refuse to delete if we're inside it
   if is_cwd_inside "$wt_path" 2>/dev/null; then
     error "Error: you are currently inside worktree '$name'"
     error "cd out of it first, then run: wt delete $name"
     exit 1
+  fi
+
+  if worktree_has_local_files "$wt_path"; then
+    error "Error: worktree '$name' has tracked, untracked, or ignored files, or status failed"
+    error "Inspect their provenance and remove them separately before deleting this worktree"
+    return 1
+  fi
+
+  if worktree_in_use "$wt_path"; then
+    error "Error: a running process is using worktree '$name'"
+    return 1
   fi
 
   log ""
@@ -695,19 +719,19 @@ cmd_delete() {
   log ""
 
   # Remove the worktree
-  if git -C "$repo_root" worktree remove --force "$wt_path" 2>/dev/null; then
+  if git -C "$repo_root" worktree remove "$wt_path" 2>/dev/null; then
     success "Worktree removed"
   else
-    error "Failed to remove worktree — trying harder..."
-    # Force cleanup: remove directory and prune
-    rm -rf "$wt_path"
-    git -C "$repo_root" worktree prune 2>/dev/null || true
-    success "Worktree force-removed"
+    error "Failed to remove worktree; it and its branch were kept"
+    return 1
   fi
 
-  # Delete the branch (force, since it may be unmerged)
+  # Delete the branch (force, since it may be unmerged).
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-    git -C "$repo_root" branch -D "$branch" >/dev/null 2>&1 || true
+    if ! git -C "$repo_root" branch -D "$branch" >/dev/null 2>&1; then
+      error "Worktree removed, but branch '$branch' could not be deleted"
+      return 1
+    fi
     success "Branch '$branch' deleted"
   fi
 
@@ -733,8 +757,8 @@ Usage:
   wt <name>              Create a new worktree and cd into it
   wt init                Add a project-owned bootstrap scaffold
   wt list                List all worktrees with branch and merge status
-  wt cleanup [name…]     Remove merged worktrees (only the named ones, if given)
-  wt delete <name>       Force-remove a worktree (even if unmerged)
+  wt cleanup <name> ... Remove named, merged, clean worktrees
+  wt delete <name>       Remove a named clean worktree (even if unmerged)
   wt help                Show this help
 
 What happens on create:
@@ -750,12 +774,12 @@ What happens on init:
   - Never overwrites an existing bootstrap
 
 What happens on cleanup:
-  - Only removes worktrees whose branches are merged into main
-  - Unmerged worktrees are kept (safe by default)
+  - Requires explicit worktree names and removes only merged branches
+  - Keeps worktrees with tracked, untracked, or ignored files, or running processes
 
 What happens on delete:
-  - Force-removes the worktree and its branch regardless of merge status
-  - Refuses if you're currently inside the worktree
+  - Removes a named clean worktree and its branch regardless of merge status
+  - Refuses local files, running processes, or the current worktree
 
 Note: list, cleanup, and delete scan both .wt/ and legacy .worktrees/ directories.
 
@@ -763,8 +787,8 @@ Examples:
   wt init                Scaffold first-time project setup
   wt auth-refactor       Create worktree for auth work
   wt list                See all worktrees and their status
-  wt cleanup             Remove merged worktrees
-  wt delete old-feature  Force-remove a worktree
+  wt cleanup old-feature  Remove one merged, clean worktree
+  wt delete old-feature  Remove one clean worktree, even if unmerged
 
 EOF
 }
@@ -773,6 +797,15 @@ EOF
 
 main() {
   local command="${1:-}"
+
+  # Help is read-only even when supplied after a destructive command or target.
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == help || "$arg" == --help || "$arg" == -h ]]; then
+      cmd_help
+      return 0
+    fi
+  done
 
   if [ -z "$command" ]; then
     cmd_help
@@ -791,7 +824,8 @@ main() {
       cmd_cleanup "$@"
       ;;
     delete|rm)
-      cmd_delete "${2:-}"
+      shift
+      cmd_delete "$@"
       ;;
     help|--help|-h)
       cmd_help
